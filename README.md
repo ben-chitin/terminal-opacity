@@ -81,10 +81,8 @@ Tested on Foot 1.28, Kitty 0.49, Ghostty 1.4 and Alacritty 0.17.
 
 ## Install on another machine
 
-Copy this directory to `~/.config/omarchy/plugins/bhj.terminal-opacity/`, keep
-`terminal-opacity` executable, then run:
-
 ```sh
+git clone https://github.com/ben-chitin/terminal-opacity ~/.config/omarchy/plugins/bhj.terminal-opacity
 ~/.config/omarchy/plugins/bhj.terminal-opacity/terminal-opacity install
 ```
 
