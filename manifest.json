@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "bhj.terminal-opacity",
+  "name": "Terminal opacity",
+  "version": "2.2.0",
+  "author": "bhj",
+  "description": "A slider for the background opacity of every terminal, or of one window, live as you drag. Text stays solid.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Terminal opacity",
+    "description": "Background opacity for all terminals or the one you pick, changed live. Scroll on the icon to nudge the focused terminal.",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false
+  },
+  "keepLoaded": true
+}

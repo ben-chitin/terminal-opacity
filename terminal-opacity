@@ -1,0 +1,1350 @@
+#!/usr/bin/env bash
+# Terminal background opacity for every terminal on the desktop.
+#
+# The value is a background opacity percent: 100 is a solid background, 0 is a
+# fully clear one. Text stays solid wherever the terminal can fade its own
+# background:
+#
+#   foot       OSC 11 with an alpha, written to the window's pty   per window
+#   alacritty  `alacritty msg config` over its IPC socket          per process
+#   ghostty    an include file plus SIGUSR2 to one process         per process
+#   kitty      an include file plus SIGUSR1 to one process         per process
+#   any other  Hyprland's opacity for that window                  per window
+#
+# The last one fades the whole window, text included, since nothing else can be
+# done from outside a terminal that has no background-only control. Terminals
+# with their own control are pinned to full compositor opacity instead, so
+# Omarchy's whole-window fade does not dim their text.
+#
+# "all" sets a default: saved, written into each terminal's include file so new
+# windows launch with it, and pushed to every open terminal. A single window
+# gets an override that lasts until it closes.
+#
+# Hyprland blurs what shows through a see-through window whenever its blur is
+# on (Omarchy's Glassy look turns it on). That frosted look is a choice here,
+# off unless asked for, and it follows the opacity's pattern: a default for
+# every terminal, or an override for one window until it closes.
+#
+# Programs that paint their own background colours (the panels of a CLI
+# harness, say) keep those solid, since a terminal only fades its default
+# background. `cells on` asks each terminal to fade painted backgrounds too,
+# at the same opacity:
+#
+#   foot       alpha-mode=all             read at launch, so new windows only
+#   ghostty    background-opacity-cells   live
+#   alacritty  transparent_background_colors   live
+#   kitty      only the colours listed in ~/.config/kitty/transparency-colors
+#
+# `serve` keeps one process running for the bar widget and takes commands on
+# stdin, so dragging the slider costs no process start per step.
+
+set -uo pipefail
+
+PLUGIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE="$STATE_DIR/terminal-opacity-v2.json"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+THEME_DIR="$STATE_DIR/current/theme"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+HOOK="$CONFIG_DIR/omarchy/hooks/theme-set.d/20-terminal-opacity"
+WIDGET_ID="bhj.terminal-opacity"
+MANAGED_NOTE="Written by the Terminal opacity bar widget ($WIDGET_ID). Edits here are overwritten."
+US=$'\x1f'
+
+# A terminal with no background-only control fades as a whole window, so it
+# is never taken all the way to invisible.
+WINDOW_FLOOR=10
+
+# Apps that hold a pty without being a terminal emulator.
+NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
+
+mkdir -p "$STATE_DIR"
+
+# --- State -------------------------------------------------------------------
+
+DEFAULT=""          # saved default opacity, empty when the theme decides
+declare -A OV=()    # window address -> opacity override
+declare -A OVPID=() # window address -> pid the override was saved for
+BLUR=0              # 1 when what shows through a terminal is blurred
+CELLS=0             # 1 when backgrounds that programs paint fade too
+declare -A BOV=()    # window address -> blur override, 1 or 0
+declare -A BOVPID=() # window address -> pid the blur override was saved for
+
+lock_state() {
+  exec 9>>"$STATE_DIR/terminal-opacity.lock"
+  flock 9
+}
+
+unlock_state() {
+  flock -u 9
+}
+
+load_state() {
+  DEFAULT=""
+  OV=()
+  OVPID=()
+  BLUR=0
+  CELLS=0
+  BOV=()
+  BOVPID=()
+  [[ -f $STATE ]] || return 0
+  local kind a b c d
+  while IFS=$'\t' read -r kind a b c d; do
+    case "$kind" in
+      default) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && DEFAULT=$a ;;
+      blur) BLUR=1 ;;
+      cells) CELLS=1 ;;
+      window)
+        [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
+        if [[ $c =~ ^[0-9]+$ ]] && (( c <= 100 )); then
+          OV[$a]=$c
+          OVPID[$a]=$b
+        fi
+        case "$d" in
+          on) BOV[$a]=1; BOVPID[$a]=$b ;;
+          off) BOV[$a]=0; BOVPID[$a]=$b ;;
+        esac
+        ;;
+    esac
+  done < <(jq -r '
+    (if (.default | type) == "number" then "default\t\(.default)" else empty end),
+    (if .blur == true then "blur" else empty end),
+    (if .cells == true then "cells" else empty end),
+    ((.windows // {}) | to_entries[]
+      | select((.value | type) == "object")
+      | "window\t\(.key)\t\(.value.pid)\t\(.value.opacity // "-")\t\(
+          if .value.blur == true then "on" elif .value.blur == false then "off" else "-" end)")
+  ' "$STATE" 2>/dev/null)
+}
+
+# Addresses, pids and percents are all validated, so the JSON is built by hand.
+save_state() {
+  local tmp addr entry sep="" body=""
+  local -A saved=()
+  for addr in "${!OV[@]}" "${!BOV[@]}"; do saved[$addr]=1; done
+  for addr in "${!saved[@]}"; do
+    entry="\"pid\":${OVPID[$addr]:-${BOVPID[$addr]:-0}}"
+    [[ -n ${OV[$addr]:-} ]] && entry+=",\"opacity\":${OV[$addr]}"
+    if [[ -n ${BOV[$addr]:-} ]]; then
+      [[ ${BOV[$addr]} == 1 ]] && entry+=',"blur":true' || entry+=',"blur":false'
+    fi
+    body+="$sep\"$addr\":{$entry}"
+    sep=","
+  done
+  tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
+  printf '{"default":%s,"blur":%s,"cells":%s,"windows":{%s}}\n' "${DEFAULT:-null}" \
+    "$( ((BLUR)) && printf true || printf false)" \
+    "$( ((CELLS)) && printf true || printf false)" "$body" >"$tmp"
+  mv -f "$tmp" "$STATE"
+}
+
+# --- Small helpers -----------------------------------------------------------
+
+now_ms() {
+  local t=${EPOCHREALTIME/[.,]/}
+  printf '%s' "${t:0:13}"
+}
+
+# 65 -> 0.65
+alpha_of() {
+  printf '%d.%02d' $(($1 / 100)) $(($1 % 100))
+}
+
+# 0.65 -> 65
+percent_of() {
+  local v=$1 frac
+  [[ $v =~ ^[0-9]*([.][0-9]+)?$ && -n $v ]] || { printf '100'; return; }
+  if [[ $v != *.* ]]; then
+    (( 10#$v >= 1 )) && printf '100' || printf '0'
+    return
+  fi
+  (( 10#0${v%%.*} >= 1 )) && { printf '100'; return; }
+  frac="${v#*.}00"
+  printf '%d' "$((10#${frac:0:2}))"
+}
+
+clamp() {
+  local v=$1 lo=$2 hi=$3
+  (( v < lo )) && v=$lo
+  (( v > hi )) && v=$hi
+  printf '%d' "$v"
+}
+
+# The last value of a setting in a config file. The setting name is an ERE.
+last_setting() {
+  local file=$1 name=$2 line value=""
+  [[ -r $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ ^[[:space:]]*$name[[:space:]]*[=[:space:]][[:space:]]*\"?([0-9.]+) ]]; then
+      value=${BASH_REMATCH[1]}
+    fi
+  done <"$file"
+  printf '%s' "$value"
+}
+
+# --- Foot config -------------------------------------------------------------
+#
+# Foot takes its alpha together with a background colour, so the colour its
+# config would launch with has to be known.
+
+declare -A SEEN_INI=() FOOT_BGS=() FOOT_ALPHAS=()
+FOOT_THEME="dark"
+FOOT_BG="000000"
+FOOT_CONFIG_OPACITY=100
+
+expand_path() {
+  local path=$1 dir=$2
+  path=${path#"${path%%[![:space:]]*}"}
+  path=${path%"${path##*[![:space:]]}"}
+  path=${path#\"}; path=${path%\"}
+  if [[ $path == "~/"* || $path == "~" ]]; then
+    path="$HOME${path:1}"
+  elif [[ $path != /* && -n $dir ]]; then
+    path="$dir/$path"
+  fi
+  printf '%s' "$path"
+}
+
+parse_foot_ini() {
+  local file=$1 dir line section="" key value
+  [[ -f $file ]] || return 0
+  [[ -z ${SEEN_INI[$file]:-} ]] || return 0
+  SEEN_INI[$file]=1
+  # Our own include is the saved default, not what the theme would give.
+  [[ $file == "$CONFIG_DIR/foot/transparency.ini" ]] && return 0
+  dir=${file%/*}
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    [[ -z $line || $line == \#* ]] && continue
+    if [[ $line == \[*\]* ]]; then
+      section=${line#[}
+      section=${section%%]*}
+      continue
+    fi
+    [[ $line == *=* ]] || continue
+    key=${line%%=*}
+    key=${key//[[:space:]]/}
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%%[[:space:]]#*}
+    value=${value%"${value##*[![:space:]]}"}
+    case "$key" in
+      include) parse_foot_ini "$(expand_path "$value" "$dir")" ;;
+      initial-color-theme) [[ $value == light || $value == dark ]] && FOOT_THEME=$value ;;
+      background) [[ $value =~ ^[0-9A-Fa-f]{6}$ ]] && FOOT_BGS[$section]=${value,,} ;;
+      alpha) [[ $value =~ ^[0-9]*([.][0-9]+)?$ && -n $value ]] && FOOT_ALPHAS[$section]=$value ;;
+    esac
+  done <"$file"
+}
+
+load_foot_config() {
+  SEEN_INI=()
+  FOOT_BGS=()
+  FOOT_ALPHAS=()
+  FOOT_THEME="dark"
+  parse_foot_ini "$CONFIG_DIR/foot/foot.ini"
+  local section bg="" alpha=""
+  for section in "colors-$FOOT_THEME" colors colors-dark colors-light; do
+    [[ -z $bg && -n ${FOOT_BGS[$section]:-} ]] && bg=${FOOT_BGS[$section]}
+    [[ -z $alpha && -n ${FOOT_ALPHAS[$section]:-} ]] && alpha=${FOOT_ALPHAS[$section]}
+  done
+  FOOT_BG=${bg:-000000}
+  FOOT_CONFIG_OPACITY=$(percent_of "${alpha:-1}")
+}
+
+# What a terminal's own config and theme give it when no default is saved.
+declare -A CONFIG_OPACITY=()
+
+config_opacity() {
+  local emu=$1 value=""
+  if [[ -n ${CONFIG_OPACITY[$emu]:-} ]]; then
+    printf '%s' "${CONFIG_OPACITY[$emu]}"
+    return
+  fi
+  case "$emu" in
+    foot) value=$(alpha_of "$FOOT_CONFIG_OPACITY") ;;
+    ghostty)
+      value=$(last_setting "$THEME_DIR/ghostty.conf" 'background-opacity')
+      [[ -n $value ]] || value=$(last_setting "$CONFIG_DIR/ghostty/config" 'background-opacity')
+      ;;
+    kitty)
+      value=$(last_setting "$CONFIG_DIR/kitty/kitty.conf" 'background_opacity')
+      [[ -n $value ]] || value=$(last_setting "$THEME_DIR/kitty.conf" 'background_opacity')
+      ;;
+    alacritty)
+      value=$(last_setting "$CONFIG_DIR/alacritty/alacritty.toml" 'opacity')
+      [[ -n $value ]] || value=$(last_setting "$THEME_DIR/alacritty.toml" 'opacity')
+      ;;
+  esac
+  CONFIG_OPACITY[$emu]=$(percent_of "${value:-1}")
+  printf '%s' "${CONFIG_OPACITY[$emu]}"
+}
+
+# --- Terminal config includes ------------------------------------------------
+#
+# Each terminal gets a small include file holding only the opacity, wired into
+# its config after the theme include so it wins over the theme.
+
+write_file() {
+  local file=$1 content=$2 tmp
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  printf '%s' "$content" >"$tmp"
+  mv -f "$tmp" "$file"
+}
+
+KITTY_COLORS_FILE="$CONFIG_DIR/kitty/transparency-colors"
+
+# Kitty fades a painted background only when its colour is listed: up to seven,
+# one per line, each optionally with its own opacity as colour@0.5.
+kitty_colors() {
+  local line list="" count=0
+  [[ -r $KITTY_COLORS_FILE ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%[[:space:]]#*}
+    line=${line//[[:space:]]/}
+    [[ $line =~ ^(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}|[a-zA-Z]+)(@(0|1|0?\.[0-9]+|1\.0+))?$ ]] || continue
+    list+="${list:+ }$line"
+    (( ++count >= 7 )) && break
+  done <"$KITTY_COLORS_FILE"
+  printf '%s' "$list"
+}
+
+kitty_colors_template() {
+  [[ -d $CONFIG_DIR/kitty && ! -e $KITTY_COLORS_FILE ]] || return 0
+  write_file "$KITTY_COLORS_FILE" "# Background colours Kitty fades when the Terminal opacity widget's
+# \"Fade painted backgrounds too\" is on. Kitty has no setting for every
+# colour, so list the ones your programs paint: up to seven, one per line.
+#
+#   #1f2335        fades with the terminal's own background opacity
+#   #1f2335@0.4    fades to its own opacity, 0 to 1
+#
+# \`terminal-opacity colors <program>\` runs a program and lists the colours
+# it paints. Change this file, then flip the switch off and on.
+"
+}
+
+# An empty opacity leaves the theme's own value in charge.
+write_include() {
+  local emu=$1 opacity=$2 alpha="" value="" extra=""
+  [[ -n $opacity ]] && alpha=$(alpha_of "$opacity")
+  case "$emu" in
+    foot)
+      [[ -d $CONFIG_DIR/foot ]] || return 0
+      [[ -n $alpha ]] && value="alpha=$alpha"$'\n'
+      (( CELLS )) && value+="alpha-mode=all"$'\n'
+      if [[ -n $value ]]; then
+        write_file "$CONFIG_DIR/foot/transparency.ini" \
+          "# $MANAGED_NOTE"$'\n'"[colors-dark]"$'\n'"$value[colors-light]"$'\n'"$value"
+      else
+        write_file "$CONFIG_DIR/foot/transparency.ini" "# $MANAGED_NOTE"$'\n'
+      fi
+      ;;
+    alacritty)
+      [[ -d $CONFIG_DIR/alacritty ]] || return 0
+      [[ -n $alpha ]] && value="[window]"$'\n'"opacity = $alpha"$'\n'
+      (( CELLS )) && value+="[colors]"$'\n'"transparent_background_colors = true"$'\n'
+      write_file "$CONFIG_DIR/alacritty/transparency.toml" "# $MANAGED_NOTE"$'\n'"$value"
+      ;;
+    kitty)
+      [[ -d $CONFIG_DIR/kitty ]] || return 0
+      # The dynamic flag is what lets a reload change a running window.
+      [[ -n $alpha ]] && value="background_opacity $alpha"$'\n'
+      if (( CELLS )); then
+        extra=$(kitty_colors)
+        [[ -n $extra ]] && value+="transparent_background_colors $extra"$'\n'
+      fi
+      write_file "$CONFIG_DIR/kitty/transparency.conf" \
+        "# $MANAGED_NOTE"$'\n'"${value}dynamic_background_opacity yes"$'\n'
+      ;;
+    ghostty)
+      [[ -d $CONFIG_DIR/ghostty ]] || return 0
+      # Each step of the slider is a reload, which would otherwise raise a
+      # "Reloaded the configuration" toast every time.
+      [[ -n $alpha ]] && value="background-opacity = $alpha"$'\n'
+      (( CELLS )) && value+="background-opacity-cells = true"$'\n'
+      write_file "$CONFIG_DIR/ghostty/transparency" \
+        "# $MANAGED_NOTE"$'\n'"${value}app-notifications = no-config-reload"$'\n'
+      ;;
+  esac
+}
+
+write_includes() {
+  local emu
+  for emu in foot alacritty kitty ghostty; do
+    write_include "$emu" "$1"
+  done
+}
+
+# Add $line to $file after the first line matching $after, or at the top when
+# nothing matches and $fallback is "top", or at the end when it is "bottom".
+ensure_line() {
+  local file=$1 present=$2 line=$3 after=$4 fallback=$5 tmp
+  [[ -f $file ]] || return 0
+  grep -qE "$present" "$file" && return 0
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  if [[ -n $after ]] && grep -qE "$after" "$file"; then
+    INS="$line" RE="$after" awk 'BEGIN{done=0} {print} !done && $0 ~ ENVIRON["RE"] {print ENVIRON["INS"]; done=1}' "$file" >"$tmp"
+  elif [[ $fallback == top ]]; then
+    { printf '%s\n' "$line"; cat "$file"; } >"$tmp"
+  else
+    cat "$file" >"$tmp"
+    [[ -s $file && -n $(tail -c 1 "$file") ]] && printf '\n' >>"$tmp"
+    printf '%s\n' "$line" >>"$tmp"
+  fi
+  mv -f "$tmp" "$file"
+}
+
+# Alacritty keeps its imports in one TOML array; ours goes on the end so it
+# loads after the theme.
+alacritty_wire() {
+  local file=$1 import=$2 tmp
+  [[ -f $file ]] || return 0
+  grep -qF "$import" "$file" && return 0
+  local array='^[[:space:]]*(general\.)?import[[:space:]]*=[[:space:]]*\[[^]]*\][[:space:]]*(#.*)?$'
+  grep -qE "$array" "$file" || return 1
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  IMP="$import" RE="$array" awk '
+    BEGIN{done=0}
+    !done && $0 ~ ENVIRON["RE"] {
+      i = index($0, "]")
+      head = substr($0, 1, i - 1)
+      tail = substr($0, i)
+      sub(/[[:space:]]+$/, "", head)
+      if (head ~ /\[$/) print head " \"" ENVIRON["IMP"] "\" " tail
+      else print head ", \"" ENVIRON["IMP"] "\" " tail
+      done = 1
+      next
+    }
+    {print}
+  ' "$file" >"$tmp" && mv -f "$tmp" "$file"
+}
+
+WIRED=0
+WIRE_NOTE=""
+
+# Point each terminal's config at its include file. Runs once per process, and
+# only once something needs the include to be read.
+ensure_wired() {
+  (( WIRED )) && return 0
+  WIRED=1
+  local emu
+  for emu in foot alacritty kitty ghostty; do
+    case "$emu" in
+      foot) [[ -f $CONFIG_DIR/foot/transparency.ini ]] || write_include foot "$DEFAULT" ;;
+      alacritty) [[ -f $CONFIG_DIR/alacritty/transparency.toml ]] || write_include alacritty "$DEFAULT" ;;
+      kitty) [[ -f $CONFIG_DIR/kitty/transparency.conf ]] || write_include kitty "$DEFAULT" ;;
+      ghostty) [[ -f $CONFIG_DIR/ghostty/transparency ]] || write_include ghostty "$DEFAULT" ;;
+    esac
+  done
+  ensure_line "$CONFIG_DIR/foot/foot.ini" \
+    '^[[:space:]]*include[[:space:]]*=.*foot/transparency\.ini' \
+    'include=~/.config/foot/transparency.ini' \
+    '^[[:space:]]*include[[:space:]]*=.*current/theme/foot\.ini' top
+  alacritty_wire "$CONFIG_DIR/alacritty/alacritty.toml" "~/.config/alacritty/transparency.toml" ||
+    WIRE_NOTE="Alacritty: add \"~/.config/alacritty/transparency.toml\" to general.import in alacritty.toml."
+  ensure_line "$CONFIG_DIR/kitty/kitty.conf" \
+    '^[[:space:]]*include[[:space:]]+.*kitty/transparency\.conf' \
+    'include ~/.config/kitty/transparency.conf' '' bottom
+  ensure_line "$CONFIG_DIR/ghostty/config" \
+    '^[[:space:]]*config-file[[:space:]]*=.*ghostty/transparency"?[[:space:]]*$' \
+    'config-file = ?"~/.config/ghostty/transparency"' '' bottom
+}
+
+unwire() {
+  local file
+  file="$CONFIG_DIR/foot/foot.ini"
+  [[ -f $file ]] && sed -i '\|^[[:space:]]*include[[:space:]]*=.*foot/transparency\.ini|d' "$file"
+  file="$CONFIG_DIR/kitty/kitty.conf"
+  [[ -f $file ]] && sed -i '\|^[[:space:]]*include[[:space:]]\+.*kitty/transparency\.conf|d' "$file"
+  file="$CONFIG_DIR/ghostty/config"
+  [[ -f $file ]] && sed -i '\|^[[:space:]]*config-file[[:space:]]*=.*ghostty/transparency"\?[[:space:]]*$|d' "$file"
+  file="$CONFIG_DIR/alacritty/alacritty.toml"
+  [[ -f $file ]] && sed -i -E 's|,?[[:space:]]*"~/\.config/alacritty/transparency\.toml"[[:space:]]*||' "$file"
+  rm -f "$CONFIG_DIR/foot/transparency.ini" "$CONFIG_DIR/kitty/transparency.conf" \
+    "$KITTY_COLORS_FILE" \
+    "$CONFIG_DIR/ghostty/transparency" "$CONFIG_DIR/alacritty/transparency.toml"
+}
+
+# --- Windows -----------------------------------------------------------------
+
+declare -a W_ORDER=()
+declare -A W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=()
+declare -A PID_EMU=() PID_NAME=() PID_COUNT=() PTS=()
+declare -A PINNED=() SEEN=() NO_BLUR=()
+FOCUSED_ADDR=""
+BLUR_AVAILABLE=false
+
+holds_pty() {
+  local fd
+  for fd in /proc/"$1"/fd/*; do
+    [[ $fd -ef /dev/ptmx || $fd -ef /dev/pts/ptmx ]] && return 0
+  done
+  return 1
+}
+
+# Sets PID_EMU[pid] to foot, alacritty, kitty, ghostty, other (a terminal with
+# no control of its own) or none (not a terminal).
+classify() {
+  local pid=$1 class=$2 tagged=$3 comm="" emu=""
+  { comm=$(</proc/"$pid"/comm); } 2>/dev/null
+  case "${comm,,}" in
+    foot | footclient) emu=foot ;;
+    alacritty) emu=alacritty ;;
+    kitty) emu=kitty ;;
+    ghostty) emu=ghostty ;;
+  esac
+  if [[ -z $emu ]]; then
+    case "${class,,}" in
+      foot | footclient | org.codeberg.dnkl.foot) emu=foot ;;
+      alacritty) emu=alacritty ;;
+      kitty) emu=kitty ;;
+      ghostty | com.mitchellh.ghostty) emu=ghostty ;;
+    esac
+  fi
+  if [[ -z $emu ]]; then
+    if [[ $tagged == true ]]; then
+      emu=other
+    elif [[ ! ${class,,} =~ $NOT_TERMINALS ]] && holds_pty "$pid"; then
+      emu=other
+    else
+      emu=none
+    fi
+  fi
+  PID_EMU[$pid]=$emu
+  case "$emu" in
+    foot) PID_NAME[$pid]="Foot" ;;
+    alacritty) PID_NAME[$pid]="Alacritty" ;;
+    kitty) PID_NAME[$pid]="Kitty" ;;
+    ghostty) PID_NAME[$pid]="Ghostty" ;;
+    *) PID_NAME[$pid]=${comm:-$class} ;;
+  esac
+}
+
+# The ptys of the programs Foot started: each child's controlling terminal,
+# read from its stat line.
+foot_pts() {
+  local pid=$1 kids kid stat tty major minor found=""
+  local -a fields
+  { kids=$(</proc/"$pid"/task/"$pid"/children); } 2>/dev/null || kids=""
+  for kid in $kids; do
+    { stat=$(</proc/"$kid"/stat); } 2>/dev/null || continue
+    read -r -a fields <<<"${stat##*) }"
+    tty=${fields[4]:-0}
+    major=$(((tty >> 8) & 0xfff))
+    minor=$(((tty & 0xff) | ((tty >> 12) & 0xfff00)))
+    (( major == 136 )) || continue
+    [[ " $found " == *" /dev/pts/$minor "* ]] || found+="${found:+ }/dev/pts/$minor"
+  done
+  printf '%s' "$found"
+}
+
+scan() {
+  local clients row addr pid class tagged focused fs ws title
+  clients=$(timeout 2 hyprctl clients -j 2>/dev/null) || clients='[]'
+  # Nothing is blurred, whatever is chosen here, unless Hyprland's blur is on.
+  BLUR_AVAILABLE=$(timeout 2 hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r '.bool == true' 2>/dev/null)
+  [[ $BLUR_AVAILABLE == true ]] || BLUR_AVAILABLE=false
+  W_ORDER=()
+  W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=()
+  PID_COUNT=()
+  CONFIG_OPACITY=()
+  FOCUSED_ADDR=""
+  load_foot_config
+  while IFS=$US read -r addr pid class tagged focused fs ws title; do
+    [[ $addr =~ ^0x[0-9a-fA-F]+$ && $pid =~ ^[0-9]+$ ]] || continue
+    (( pid > 0 )) || continue
+    [[ $focused == true ]] && FOCUSED_ADDR=$addr
+    [[ -n ${PID_EMU[$pid]:-} ]] || classify "$pid" "$class" "$tagged"
+    [[ ${PID_EMU[$pid]} != none ]] || continue
+    W_ORDER+=("$addr")
+    W_PID[$addr]=$pid
+    W_EMU[$addr]=${PID_EMU[$pid]}
+    W_NAME[$addr]=${PID_NAME[$pid]}
+    W_TITLE[$addr]=${title:-${PID_NAME[$pid]}}
+    W_WS[$addr]=$ws
+    W_FOCUSED[$addr]=$focused
+    W_FS[$addr]=$fs
+    PID_COUNT[$pid]=$((${PID_COUNT[$pid]:-0} + 1))
+  done < <(jq -r '
+    .[] | select(.mapped != false) | [
+      .address,
+      (.pid | tostring),
+      (.class // ""),
+      (((.tags // []) | map(sub("\\*$"; "")) | index("terminal")) != null | tostring),
+      (.focusHistoryID == 0 | tostring),
+      ((.fullscreen // 0) != 0 | tostring),
+      (.workspace.name // "" | tostring),
+      (.title // "" | explode | map(select(. >= 32 and . != 127)) | implode | .[0:120])
+    ] | join("\u001f")
+  ' <<<"$clients" 2>/dev/null)
+
+  # A process that closed takes its cached details with it.
+  local known
+  for known in "${!PID_EMU[@]}"; do
+    [[ -d /proc/$known ]] || unset "PID_EMU[$known]" "PID_NAME[$known]" "PTS[$known]"
+  done
+
+  # Hyprland reuses addresses, so an override is only for the process it was
+  # saved for.
+  local dropped=0
+  for addr in "${!OV[@]}"; do
+    if [[ ${W_PID[$addr]:-} != "${OVPID[$addr]}" ]]; then
+      unset "OV[$addr]" "OVPID[$addr]"
+      dropped=1
+    fi
+  done
+  for addr in "${!BOV[@]}"; do
+    if [[ ${W_PID[$addr]:-} != "${BOVPID[$addr]}" ]]; then
+      unset "BOV[$addr]" "BOVPID[$addr]"
+      dropped=1
+    fi
+  done
+  for addr in "${!PINNED[@]}"; do
+    [[ -n ${W_PID[$addr]:-} ]] || unset "PINNED[$addr]"
+  done
+  for addr in "${!SEEN[@]}"; do
+    [[ -n ${W_PID[$addr]:-} ]] || unset "SEEN[$addr]"
+  done
+  for addr in "${!NO_BLUR[@]}"; do
+    [[ -n ${W_PID[$addr]:-} ]] || unset "NO_BLUR[$addr]"
+  done
+  for addr in "${W_ORDER[@]}"; do
+    (( ${PID_COUNT[${W_PID[$addr]}]} > 1 )) && W_SHARED[$addr]=true || W_SHARED[$addr]=false
+  done
+  return $dropped
+}
+
+# The opacity a window shows: its override, else the default, else whatever its
+# own config gives it.
+value_of() {
+  local addr=$1
+  if [[ -n ${OV[$addr]:-} ]]; then
+    printf '%s' "${OV[$addr]}"
+  elif [[ -n $DEFAULT ]]; then
+    if [[ ${W_EMU[$addr]} == other ]]; then
+      clamp "$DEFAULT" "$WINDOW_FLOOR" 100
+    else
+      printf '%s' "$DEFAULT"
+    fi
+  elif [[ ${W_EMU[$addr]} == other ]]; then
+    printf '100'
+  else
+    config_opacity "${W_EMU[$addr]}"
+  fi
+}
+
+# --- Applying ----------------------------------------------------------------
+
+HYPR_BATCH=""
+
+queue_prop() {
+  HYPR_BATCH+="${HYPR_BATCH:+ ; }dispatch hl.dsp.window.set_prop({ prop = \"opacity\", value = \"$2\", window = \"address:$1\" })"
+}
+
+flush_props() {
+  [[ -n $HYPR_BATCH ]] || return 0
+  timeout 2 hyprctl --batch "$HYPR_BATCH" >/dev/null 2>&1
+  HYPR_BATCH=""
+}
+
+# Full compositor opacity, so only the terminal's own background fades.
+pin() {
+  local addr=$1
+  [[ -n ${PINNED[$addr]:-} ]] && return 0
+  queue_prop "$addr" "1 override 1 override 1 override"
+  PINNED[$addr]=1
+}
+
+# Whether Hyprland blurs what shows through a terminal. Told to each window
+# once, and again when the choice changes.
+# A window's blur: its override, else the default.
+blur_of() {
+  printf '%s' "${BOV[$1]:-$BLUR}"
+}
+
+queue_blur() {
+  local addr=$1 off=1
+  [[ $(blur_of "$addr") == 1 ]] && off=0
+  [[ ${NO_BLUR[$addr]:-} == "$off" ]] && return 0
+  HYPR_BATCH+="${HYPR_BATCH:+ ; }dispatch hl.dsp.window.set_prop({ prop = \"no_blur\", value = \"$off\", window = \"address:$addr\" })"
+  NO_BLUR[$addr]=$off
+}
+
+queue_blur_all() {
+  local addr
+  for addr in "${W_ORDER[@]}"; do
+    queue_blur "$addr"
+  done
+}
+
+# A write to a pty blocks while its terminal is paused (Ctrl-S), so it is
+# never made from this process. Steps of a drag go out in the background; the
+# value that is kept goes out in order, with a time limit.
+write_pty() {
+  local pts=$1 opacity=$2 keep=$3
+  [[ $pts =~ ^/dev/pts/[0-9]+$ && -w $pts ]] || return 1
+  if (( keep )); then
+    PTS_PATH=$pts OSC=$(printf '\033]11;[%d]#%s\033\\' "$opacity" "$FOOT_BG") \
+      timeout 1 bash -c 'printf "%s" "$OSC" >"$PTS_PATH"' 2>/dev/null
+  else
+    { printf '\033]11;[%d]#%s\033\\' "$opacity" "$FOOT_BG" >"$pts"; } 2>/dev/null &
+  fi
+}
+
+RESTORE_AT=0
+declare -A RESTORE_EMU=()
+
+# Apply one opacity to a list of windows. $2 is 1 for a value that is kept and
+# 0 for a step of a drag. $3 is 1 when the windows are every terminal, which
+# leaves the include files holding the new default.
+apply() {
+  local opacity=$1 keep=$2 everything=$3
+  shift 3
+  local addr pid emu pts sock alpha value
+  local -A done_pid=()
+  local ghostty_pids="" kitty_pids=""
+  alpha=$(alpha_of "$opacity")
+  for addr in "$@"; do
+    pid=${W_PID[$addr]:-}
+    [[ -n $pid ]] || continue
+    emu=${W_EMU[$addr]}
+    if [[ $emu == other ]]; then
+      value=$(alpha_of "$(clamp "$opacity" "$WINDOW_FLOOR" 100)")
+      queue_prop "$addr" "$value override $value override $value override"
+      continue
+    fi
+    pin "$addr"
+    [[ -z ${done_pid[$pid]:-} ]] || continue
+    done_pid[$pid]=1
+    case "$emu" in
+      foot)
+        [[ -n ${PTS[$pid]:-} ]] || PTS[$pid]=$(foot_pts "$pid")
+        for pts in ${PTS[$pid]:-}; do
+          write_pty "$pts" "$opacity" "$keep"
+        done
+        ;;
+      alacritty)
+        for sock in "$RUNTIME_DIR"/Alacritty-*-"$pid".sock; do
+          [[ -S $sock ]] || continue
+          timeout 2 alacritty msg --socket "$sock" config --window-id -1 "window.opacity=$alpha" >/dev/null 2>&1 &
+        done
+        ;;
+      ghostty) ghostty_pids+=" $pid" ;;
+      kitty) kitty_pids+=" $pid" ;;
+    esac
+  done
+  # Ghostty and Kitty read their opacity from the include file when signalled,
+  # and only the signalled process reloads. For one window the file is put
+  # back to the default once that process has read it.
+  if [[ -n $ghostty_pids ]]; then
+    ensure_wired
+    write_include ghostty "$opacity"
+    kill -USR2 $ghostty_pids 2>/dev/null
+    (( everything )) || RESTORE_EMU[ghostty]=1
+  fi
+  if [[ -n $kitty_pids ]]; then
+    ensure_wired
+    write_include kitty "$opacity"
+    kill -USR1 $kitty_pids 2>/dev/null
+    (( everything )) || RESTORE_EMU[kitty]=1
+  fi
+  if (( ${#RESTORE_EMU[@]} )); then
+    RESTORE_AT=$(($(now_ms) + 600))
+  fi
+  flush_props
+}
+
+restore_includes() {
+  local emu
+  for emu in "${!RESTORE_EMU[@]}"; do
+    write_include "$emu" "$DEFAULT"
+  done
+  RESTORE_EMU=()
+  RESTORE_AT=0
+}
+
+restore_if_due() {
+  (( RESTORE_AT > 0 )) || return 0
+  (( $(now_ms) >= RESTORE_AT )) || return 0
+  restore_includes
+}
+
+# Before a one-shot command exits, give the signalled terminals time to read.
+settle() {
+  (( RESTORE_AT > 0 )) || return 0
+  sleep 0.6
+  restore_includes
+}
+
+# Windows a target names: all, focused, or a window address. A window whose
+# process draws several windows brings the others along.
+targets_of() {
+  local target=$1 addr pid other
+  case "$target" in
+    all | \* | default) printf '%s\n' "${W_ORDER[@]}" ;;
+    focused) [[ -n ${W_PID[$FOCUSED_ADDR]:-} ]] && printf '%s\n' "$FOCUSED_ADDR" ;;
+    0x* | address:0x*)
+      addr=${target#address:}
+      pid=${W_PID[$addr]:-}
+      [[ -n $pid ]] || return 0
+      if [[ ${W_EMU[$addr]} == other || ${W_SHARED[$addr]} != true ]]; then
+        printf '%s\n' "$addr"
+      else
+        for other in "${W_ORDER[@]}"; do
+          [[ ${W_PID[$other]} == "$pid" ]] && printf '%s\n' "$other"
+        done
+      fi
+      ;;
+  esac
+}
+
+is_all() {
+  [[ $1 == all || $1 == "*" || $1 == default ]]
+}
+
+# New terminals: pin the ones with their own control, and bring the ones
+# without it to the default, since no config file can do that for them.
+adopt_new_windows() {
+  local addr value
+  queue_blur_all
+  for addr in "${W_ORDER[@]}"; do
+    [[ -z ${SEEN[$addr]:-} ]] || continue
+    SEEN[$addr]=1
+    if [[ ${W_EMU[$addr]} == other ]]; then
+      [[ -n $DEFAULT || -n ${OV[$addr]:-} ]] || continue
+      value=$(alpha_of "$(value_of "$addr")")
+      queue_prop "$addr" "$value override $value override $value override"
+    else
+      pin "$addr"
+    fi
+  done
+  flush_props
+}
+
+# --- Commands ----------------------------------------------------------------
+
+NOTE=""
+ERROR=""
+
+emit_state() {
+  local addr rows=""
+  for addr in "${W_ORDER[@]}"; do
+    rows+="$addr$US${W_TITLE[$addr]}$US${W_NAME[$addr]}$US${W_EMU[$addr]}$US$(value_of "$addr")$US"
+    rows+="$([[ -n ${OV[$addr]:-} ]] && printf true || printf false)$US${W_FOCUSED[$addr]}$US${W_FS[$addr]}$US"
+    rows+="${W_SHARED[$addr]}$US${W_WS[$addr]}$US$(blur_of "$addr")$US"
+    rows+="$([[ -n ${BOV[$addr]:-} ]] && printf true || printf false)"$'\n'
+  done
+  local shown=$DEFAULT
+  [[ -n $shown ]] || shown=$(config_opacity foot)
+  jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" \
+    --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" '
+    {
+      type: "state",
+      ok: ($error == ""),
+      error: $error,
+      note: $note,
+      focused: $focused,
+      defaultSet: ($default != ""),
+      default: $shown,
+      blur: ($blur == "1"),
+      cells: ($cells == "1"),
+      blurAvailable: ($blurAvailable == "true"),
+      windows: [inputs | select(length > 0) | split("\u001f") | {
+        address: .[0], title: .[1], terminal: .[2], emulator: .[3],
+        opacity: (.[4] | tonumber), override: (.[5] == "true"),
+        focused: (.[6] == "true"), fullscreen: (.[7] == "true"),
+        shared: (.[8] == "true"), workspace: .[9],
+        blur: (.[10] == "1"), blurOverride: (.[11] == "true"),
+        solidText: (.[3] != "other")
+      }]
+    }' <<<"$rows"
+  NOTE=""
+  ERROR=""
+}
+
+cmd_sync() {
+  lock_state
+  load_state
+  scan || save_state
+  unlock_state
+  adopt_new_windows
+}
+
+valid_percent() {
+  [[ $1 =~ ^[0-9]+$ ]] && (( $1 <= 100 ))
+}
+
+# A step of a drag: shown, not saved.
+cmd_preview() {
+  local target=$1 opacity=$2
+  valid_percent "$opacity" || return 0
+  local -a addrs=()
+  mapfile -t addrs < <(targets_of "$target")
+  (( ${#addrs[@]} )) || return 0
+  apply "$opacity" 0 "$(is_all "$target" && printf 1 || printf 0)" "${addrs[@]}"
+}
+
+cmd_commit() {
+  local target=$1 opacity=$2 addr
+  if ! valid_percent "$opacity"; then
+    ERROR="Opacity is a whole number from 0 to 100."
+    return 1
+  fi
+  lock_state
+  load_state
+  scan
+  local -a addrs=()
+  mapfile -t addrs < <(targets_of "$target")
+  if is_all "$target"; then
+    DEFAULT=$opacity
+    OV=()
+    OVPID=()
+    save_state
+    WIRED=0
+    write_includes "$DEFAULT"
+    ensure_wired
+    NOTE=$WIRE_NOTE
+    RESTORE_EMU=()
+    RESTORE_AT=0
+    (( ${#addrs[@]} )) && apply "$opacity" 1 1 "${addrs[@]}"
+  else
+    if (( ${#addrs[@]} == 0 )); then
+      unlock_state
+      [[ $target == focused ]] && ERROR="The focused window is not a terminal." || ERROR="That terminal window is not open."
+      return 1
+    fi
+    for addr in "${addrs[@]}"; do
+      OV[$addr]=$opacity
+      OVPID[$addr]=${W_PID[$addr]}
+    done
+    save_state
+    apply "$opacity" 1 0 "${addrs[@]}"
+    (( ${#addrs[@]} > 1 )) && NOTE="Those windows are drawn by one process, so they change together."
+  fi
+  unlock_state
+  for addr in "${W_ORDER[@]}"; do SEEN[$addr]=1; done
+  return 0
+}
+
+cmd_nudge() {
+  local target=$1 delta=$2
+  if [[ ! $delta =~ ^-?[0-9]+$ ]]; then
+    ERROR="Step is a whole number."
+    return 1
+  fi
+  cmd_sync
+  local -a addrs=()
+  mapfile -t addrs < <(targets_of "$target")
+  # Nothing in focus to nudge: nudge the default for every terminal instead.
+  if (( ${#addrs[@]} == 0 )) && [[ $target == focused ]]; then
+    target=all
+  fi
+  local current
+  if is_all "$target"; then
+    current=${DEFAULT:-$(config_opacity foot)}
+  else
+    (( ${#addrs[@]} )) || { ERROR="That terminal window is not open."; return 1; }
+    current=$(value_of "${addrs[0]}")
+  fi
+  cmd_commit "$target" "$(clamp $((current + delta)) 0 100)"
+}
+
+# Choose whether what shows through is blurred: for every terminal, which
+# becomes the default and clears the single-window choices, or for one window
+# until it closes. Unlike opacity this is always one window, even when its
+# process draws several, since Hyprland does the blurring.
+cmd_blur() {
+  local target=${1:-} choice=${2:-} want="" addr=""
+  case "$choice" in
+    on | true | 1) want=1 ;;
+    off | false | 0) want=0 ;;
+    toggle) ;;
+    *)
+      ERROR="Blur is on, off or toggle."
+      return 1
+      ;;
+  esac
+  lock_state
+  load_state
+  scan
+  if is_all "$target"; then
+    [[ -n $want ]] || want=$((BLUR ? 0 : 1))
+    BLUR=$want
+    BOV=()
+    BOVPID=()
+  else
+    case "$target" in
+      focused) addr=$FOCUSED_ADDR ;;
+      0x* | address:0x*) addr=${target#address:} ;;
+    esac
+    if [[ -z $addr || -z ${W_PID[$addr]:-} ]]; then
+      unlock_state
+      [[ $target == focused ]] && ERROR="The focused window is not a terminal." || ERROR="That terminal window is not open."
+      return 1
+    fi
+    if [[ -z $want ]]; then
+      [[ $(blur_of "$addr") == 1 ]] && want=0 || want=1
+    fi
+    BOV[$addr]=$want
+    BOVPID[$addr]=${W_PID[$addr]}
+  fi
+  save_state
+  unlock_state
+  queue_blur_all
+  flush_props
+  if (( want )) && [[ $BLUR_AVAILABLE != true ]]; then
+    NOTE="Hyprland's blur is off, so nothing blurs yet. Omarchy's Glassy look turns it on."
+  fi
+  return 0
+}
+
+# Choose whether backgrounds that programs paint fade along with the
+# terminal's own. One choice for every terminal, since Foot only reads it at
+# launch and so cannot be told window by window.
+cmd_cells() {
+  local want
+  case "${1:-}" in
+    on | true | 1) want=1 ;;
+    off | false | 0) want=0 ;;
+    toggle) want="" ;;
+    *)
+      ERROR="Painted backgrounds are on, off or toggle."
+      return 1
+      ;;
+  esac
+  lock_state
+  load_state
+  scan
+  [[ -n $want ]] || want=$((CELLS ? 0 : 1))
+  CELLS=$want
+  save_state
+  unlock_state
+  kitty_colors_template
+  WIRED=0
+  write_includes "$DEFAULT"
+  ensure_wired
+
+  # Ghostty and Kitty reread the include when signalled; Alacritty is told.
+  local addr pid sock waited=0 foot=0 kitty=0
+  local -A done_pid=()
+  for addr in "${W_ORDER[@]}"; do
+    pid=${W_PID[$addr]}
+    [[ -z ${done_pid[$pid]:-} ]] || continue
+    done_pid[$pid]=1
+    case "${W_EMU[$addr]}" in
+      foot) foot=1 ;;
+      ghostty) kill -USR2 "$pid" 2>/dev/null; waited=1 ;;
+      kitty) kill -USR1 "$pid" 2>/dev/null; waited=1; kitty=1 ;;
+      alacritty)
+        for sock in "$RUNTIME_DIR"/Alacritty-*-"$pid".sock; do
+          [[ -S $sock ]] || continue
+          timeout 2 alacritty msg --socket "$sock" config --window-id -1 \
+            "colors.transparent_background_colors=$( ((CELLS)) && printf true || printf false)" >/dev/null 2>&1 &
+        done
+        ;;
+    esac
+  done
+  # That reload put overridden windows back on the default: give each its own
+  # value again, one process at a time.
+  (( waited )) && sleep 0.5
+  local -A override_pid=()
+  for addr in "${W_ORDER[@]}"; do
+    [[ -n ${OV[$addr]:-} ]] && override_pid[${W_PID[$addr]}]=$addr
+  done
+  for pid in "${!override_pid[@]}"; do
+    addr=${override_pid[$pid]}
+    case "${W_EMU[$addr]}" in
+      ghostty | kitty)
+        apply "${OV[$addr]}" 1 0 "$addr"
+        sleep 0.5
+        ;;
+    esac
+  done
+  restore_includes
+
+  if (( CELLS )); then
+    if (( kitty )) && [[ -z $(kitty_colors) ]]; then
+      NOTE="Kitty fades only the colours listed in ~/.config/kitty/transparency-colors, which is empty."
+    elif (( foot )); then
+      NOTE="Foot reads this when a window opens, so open Foot windows keep theirs solid."
+    fi
+  elif (( foot )); then
+    NOTE="Foot windows opened while this was on keep fading painted backgrounds until they close."
+  fi
+  return 0
+}
+
+# The background colours a program paints, most used first, for filling in
+# Kitty's list. The program runs here as usual while what it writes is
+# recorded; its colours are read from that once it exits. A screenshot would
+# not do: the screen's colours come out a shade off what the program asked for.
+cmd_colors() {
+  if (( $# == 0 )); then
+    echo "Give the program to run, such as: terminal-opacity colors grok" >&2
+    return 2
+  fi
+  command -v script >/dev/null && command -v python3 >/dev/null || {
+    echo "This needs script and python3." >&2
+    return 1
+  }
+  local log
+  log=$(mktemp "$STATE_DIR/terminal-opacity-colors.XXXXXX") || return 1
+  script -qefc "$(printf '%q ' "$@")" "$log" || true
+  echo
+  echo "Background colours it painted, most used first:"
+  python3 -I -c '
+import collections, re, sys
+data = open(sys.argv[1], "rb").read().decode("latin-1")
+count = collections.Counter()
+named = 0
+def cube(n):
+    if n < 16:
+        return None
+    if n < 232:
+        n -= 16
+        return "#%02x%02x%02x" % tuple(0 if v == 0 else 55 + 40 * v for v in (n // 36, n // 6 % 6, n % 6))
+    return "#%02x%02x%02x" % ((8 + 10 * (n - 232),) * 3)
+for sgr in re.findall("\x1b\\[([0-9;:]*)m", data):
+    p = [x for x in re.split("[;:]", sgr)]
+    i = 0
+    while i < len(p):
+        v = p[i]
+        try:
+            if v in ("38", "48", "58"):
+                kind = p[i + 1]
+                if kind == "5":
+                    if v == "48":
+                        c = cube(int(p[i + 2]))
+                        if c: count[c] += 1
+                        else: named += 1
+                    i += 3
+                    continue
+                if kind == "2":
+                    rgb = [x for x in p[i + 2:i + 6] if x != ""][:3]
+                    if v == "48":
+                        count["#%02x%02x%02x" % tuple(int(x) for x in rgb)] += 1
+                    i += 2 + len(rgb) + (1 if p[i + 2] == "" else 0)
+                    continue
+            elif v.isdigit() and (40 <= int(v) <= 47 or 100 <= int(v) <= 107):
+                named += 1
+        except (IndexError, ValueError):
+            break
+        i += 1
+if not count and not named:
+    print("  none: it painted no background colours")
+for colour, n in count.most_common(7):
+    print("  %s    used %d times" % (colour, n))
+if named:
+    print("  It also used the theme\x27s 16 named colours %d times. Their values are" % named)
+    print("  color0 to color15 in the Kitty theme.")
+' "$log"
+  rm -f "$log"
+  echo "Put the ones to fade in $KITTY_COLORS_FILE, one per line."
+}
+
+# Put every open terminal back on its value. A theme change or a config reload
+# resets them to what the config files say.
+cmd_reapply() {
+  NO_BLUR=()
+  cmd_sync
+  PINNED=()
+  if [[ -n $DEFAULT ]]; then
+    write_includes "$DEFAULT"
+    ensure_wired
+  fi
+  local addr pid
+  local -a plain=()
+  local -A override_pid=()
+  for addr in "${W_ORDER[@]}"; do
+    if [[ -n ${OV[$addr]:-} ]]; then
+      override_pid[${W_PID[$addr]}]=$addr
+    else
+      plain+=("$addr")
+    fi
+  done
+  if (( ${#plain[@]} )); then
+    if [[ -n $DEFAULT ]]; then
+      apply "$DEFAULT" 1 1 "${plain[@]}"
+    else
+      # No default: Foot is the one that needs telling, since a theme change
+      # pushes it the theme's alpha; the others reread their config.
+      for addr in "${plain[@]}"; do
+        if [[ ${W_EMU[$addr]} == foot ]]; then
+          apply "$(value_of "$addr")" 1 1 "$addr"
+        else
+          [[ ${W_EMU[$addr]} == other ]] || pin "$addr"
+        fi
+      done
+      flush_props
+    fi
+  fi
+  # One overridden process at a time, each given time to read its value.
+  for pid in "${!override_pid[@]}"; do
+    addr=${override_pid[$pid]}
+    apply "${OV[$addr]}" 1 0 "$addr"
+    case "${W_EMU[$addr]}" in
+      ghostty | kitty) sleep 0.5 ;;
+    esac
+  done
+  restore_includes
+}
+
+# Forget the default and every override: terminals follow their theme again.
+cmd_reset() {
+  lock_state
+  load_state
+  scan
+  DEFAULT=""
+  OV=()
+  OVPID=()
+  save_state
+  write_includes ""
+  unlock_state
+  CONFIG_OPACITY=()
+  local addr pid sock
+  local -A done_pid=()
+  for addr in "${W_ORDER[@]}"; do
+    pid=${W_PID[$addr]}
+    case "${W_EMU[$addr]}" in
+      # Hyprland has no way to clear a window's opacity once set, so it goes
+      # back to solid rather than to whatever rule first applied.
+      other) queue_prop "$addr" "1" ;;
+      foot) apply "$(config_opacity foot)" 1 1 "$addr" ;;
+      alacritty)
+        [[ -z ${done_pid[$pid]:-} ]] || continue
+        for sock in "$RUNTIME_DIR"/Alacritty-*-"$pid".sock; do
+          [[ -S $sock ]] && timeout 2 alacritty msg --socket "$sock" config --window-id -1 --reset >/dev/null 2>&1
+        done
+        ;;
+      ghostty) [[ -z ${done_pid[$pid]:-} ]] && kill -USR2 "$pid" 2>/dev/null ;;
+      kitty) [[ -z ${done_pid[$pid]:-} ]] && kill -USR1 "$pid" 2>/dev/null ;;
+    esac
+    done_pid[$pid]=1
+  done
+  flush_props
+  RESTORE_EMU=()
+  RESTORE_AT=0
+}
+
+cmd_install() {
+  mkdir -p "${HOOK%/*}"
+  printf '%s\n' '#!/bin/bash' \
+    "# A theme change resets every terminal's background to the theme's own." \
+    '# Put the Terminal opacity widget'"'"'s values back.' \
+    "exec \"$PLUGIN_DIR/terminal-opacity\" reapply >/dev/null 2>&1" >"$HOOK"
+  chmod 755 "$HOOK"
+  if command -v omarchy >/dev/null 2>&1 &&
+    ! jq -e --arg id "$WIDGET_ID" '[.bar.layout[]?[]? | select(.id == $id)] | length > 0' \
+      "$CONFIG_DIR/omarchy/shell.json" >/dev/null 2>&1; then
+    omarchy bar put "$WIDGET_ID" --before omarchy.network >/dev/null 2>&1 ||
+      omarchy bar put "$WIDGET_ID" >/dev/null 2>&1 ||
+      echo "Add the widget yourself: omarchy bar put $WIDGET_ID" >&2
+  fi
+  echo "Terminal opacity is installed: the widget is in the bar and theme changes keep its values."
+}
+
+cmd_uninstall() {
+  cmd_reset
+  # Hand blur back to Hyprland's own rules.
+  BLUR=1
+  BOV=()
+  NO_BLUR=()
+  queue_blur_all
+  flush_props
+  unwire
+  rm -f "$HOOK" "$STATE"
+  echo "Terminal opacity's hook, state and config includes are removed."
+  echo "Take the widget out of the bar in ~/.config/omarchy/shell.json, then delete $PLUGIN_DIR."
+}
+
+# The bar widget's long-running backend: a command per line on stdin, a state
+# line on stdout after each command that changes what the panel shows.
+cmd_serve() {
+  local line verb a b
+  cmd_sync
+  emit_state
+  while :; do
+    if IFS= read -r -t 0.25 line; then
+      read -r verb a b <<<"$line"
+      case "$verb" in
+        preview) cmd_preview "${a:-}" "${b:-}" ;;
+        commit) cmd_commit "${a:-}" "${b:-}"; emit_state ;;
+        nudge) cmd_nudge "${a:-focused}" "${b:-0}"; emit_state ;;
+        sync) cmd_sync; emit_state ;;
+        reapply) cmd_reapply; emit_state ;;
+        reset) cmd_reset; cmd_sync; emit_state ;;
+        blur) cmd_blur "${a:-}" "${b:-}"; emit_state ;;
+        cells) cmd_cells "${a:-}"; emit_state ;;
+        quit) break ;;
+      esac
+    elif (( $? > 128 )); then
+      restore_if_due
+    else
+      break
+    fi
+  done
+  restore_includes
+}
+
+usage() {
+  cat >&2 <<EOF
+Usage: terminal-opacity <command>
+
+  list                             Show every open terminal and its opacity
+  set <all|focused|address> <0-100>  Set background opacity (100 is solid)
+  nudge <all|focused|address> <step> Change it by a step, such as 5 or -5
+  blur <all|focused|address> <on|off|toggle>
+                                   Blur what shows through (off at first)
+  cells <on|off|toggle>            Fade backgrounds that programs paint, too
+  colors <program> [arguments]     Run a program, then list the backgrounds it paints
+  reapply                          Put every terminal back on its saved value
+  reset                            Forget saved values and follow the theme
+  install                          Add the bar widget and the theme-change hook
+  uninstall                        Remove the hook, state and config includes
+EOF
+  exit 2
+}
+
+command=${1:-list}
+shift || true
+case "$command" in
+  serve) cmd_serve ;;
+  list) cmd_sync; emit_state ;;
+  set)
+    (( $# == 2 )) || usage
+    cmd_sync
+    cmd_commit "$1" "$2"
+    status=$?
+    emit_state
+    settle
+    exit $status
+    ;;
+  nudge)
+    cmd_nudge "${1:-focused}" "${2:-0}"
+    status=$?
+    emit_state
+    settle
+    exit $status
+    ;;
+  reapply) cmd_reapply; emit_state ;;
+  reset) cmd_reset; cmd_sync; emit_state ;;
+  blur)
+    (( $# == 2 )) || usage
+    cmd_blur "$1" "$2"
+    status=$?
+    emit_state
+    exit $status
+    ;;
+  cells)
+    (( $# == 1 )) || usage
+    cmd_cells "$1"
+    status=$?
+    emit_state
+    exit $status
+    ;;
+  colors) cmd_colors "$@" ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  *) usage ;;
+esac
