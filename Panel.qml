@@ -25,6 +25,16 @@ Panel {
     return false
   }
   readonly property bool blurAvailable: service ? service.blurAvailable : false
+  // Blur is wanted for what the panel points at, but Hyprland blurs nothing.
+  readonly property bool needsGlassy: (blur || defaultBlur) && !blurAvailable
+  readonly property bool switchingGlassy: service ? service.switchingGlassy : false
+  // Foot windows that started before the painted-backgrounds choice last
+  // changed, and so still draw the old one.
+  readonly property int staleCount: {
+    var n = 0
+    for (var i = 0; i < windows.length; i++) if (windows[i].stale) n++
+    return n
+  }
 
   readonly property string allAddress: "*"
   readonly property string resetAddress: "!reset"
@@ -69,6 +79,7 @@ Panel {
     for (var i = 0; i < sortedWindows.length; i++) {
       var w = sortedWindows[i]
       var parts = [w.terminal]
+      if (w.stale) parts.push("reopen to apply")
       if (w.workspace !== "") parts.push("workspace " + w.workspace)
       if (w.focused) parts.push("focused")
       if (w.fullscreen) parts.push("fullscreen")
@@ -169,19 +180,28 @@ Panel {
     if (service) service.setCells(!cells)
   }
 
-  // Top to bottom: the slider, the two switches, then the rows.
+  function turnOnGlassy() {
+    if (service && !switchingGlassy) service.turnOnGlassy()
+  }
+
+  // Top to bottom: the slider, the two switches (with the Glassy button
+  // between them while Hyprland's blur is off), then the rows.
   function moveCursor(delta) {
     if (focusSection === "slider") {
       if (delta > 0) focusSection = "blur"
       return
     }
     if (focusSection === "blur") {
-      focusSection = delta < 0 ? "slider" : "cells"
+      focusSection = delta < 0 ? "slider" : (needsGlassy ? "glassy" : "cells")
+      return
+    }
+    if (focusSection === "glassy") {
+      focusSection = delta < 0 ? "blur" : "cells"
       return
     }
     if (focusSection === "cells") {
       if (delta < 0) {
-        focusSection = "blur"
+        focusSection = needsGlassy ? "glassy" : "blur"
       } else if (rows.length) {
         focusSection = "rows"
         selectedIndex = 0
@@ -219,6 +239,10 @@ Panel {
       toggleCells()
       return
     }
+    if (focusSection === "glassy") {
+      turnOnGlassy()
+      return
+    }
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -241,6 +265,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onWindowsChanged: follow()
+  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "blur"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -436,7 +461,7 @@ Panel {
             width: parent.width
             label: "Blur what shows through"
             description: root.blur && !root.blurAvailable
-              ? "Hyprland's blur is off, so nothing blurs. Omarchy's Glassy look turns it on."
+              ? "Hyprland's blur is off, so nothing blurs yet. Turn it on below."
               : root.selectedWindow
                 ? (root.blur ? "Frosted glass behind just this window, until it closes"
                              : "Just this window: what is behind shows through sharp")
@@ -458,13 +483,89 @@ Panel {
             onClicked: root.toggleBlur()
           }
 
+          // Hyprland's blur is off by default in Omarchy, and nothing this
+          // widget asks for can blur until it is on.
+          BorderSurface {
+            id: glassyButton
+            readonly property bool hasCursor: root.cursorActive && root.focusSection === "glassy"
+            readonly property bool hot: hasCursor || glassyMouse.containsMouse
+            visible: root.needsGlassy
+            width: parent.width
+            implicitHeight: visible ? Math.max(54, glassyText.implicitHeight + Style.spacing.huge) : 0
+            radius: Style.cornerRadius
+            color: Style.controlFill(false, hot, root.bar.foreground, Commons.Color.accent)
+            borderSpec: Border.controlSpec(hot ? "hover-cursor" : "normal", root.bar.foreground, Commons.Color.accent)
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassyButton)
+
+            Text {
+              id: glassyIcon
+              textFormat: Text.PlainText
+              text: "\udb80\udcb5"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              anchors.left: parent.left
+              anchors.leftMargin: glassyButton.borderLeft + Style.spacing.rowPaddingX
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Column {
+              id: glassyText
+              anchors.left: glassyIcon.right
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: glassyButton.borderRight + Style.spacing.rowPaddingX
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.switchingGlassy ? "Turning on Hyprland's blur…" : "Turn on Hyprland's blur"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Switches Omarchy to its Glassy look, so the bar and menus blur too"
+                color: Qt.darker(root.bar.foreground, 1.5)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            MouseArea {
+              id: glassyMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: root.switchingGlassy ? Qt.BusyCursor : Qt.PointingHandCursor
+              onContainsMouseChanged: if (containsMouse) {
+                root.cursorActive = true
+                root.focusSection = "glassy"
+                root.selectedIndex = -1
+              }
+              onClicked: root.turnOnGlassy()
+            }
+          }
+
           Toggle {
             id: cellsToggle
             width: parent.width
             label: "Fade painted backgrounds too"
-            description: root.cells
-              ? "Every terminal: colours that programs paint fade with the background"
-              : "Every terminal: colours that programs paint stay solid"
+            description: root.staleCount > 0
+              ? (root.staleCount === 1 ? "1 Foot window" : root.staleCount + " Foot windows")
+                + " opened before this changed. Reopen "
+                + (root.staleCount === 1 ? "it" : "them") + " to "
+                + (root.cells ? "fade painted backgrounds" : "keep painted backgrounds solid")
+              : root.cells
+                ? "Every terminal: colours that programs paint fade with the background"
+                : "Every terminal: colours that programs paint stay solid"
             checked: root.cells
             hasCursor: root.cursorActive && root.focusSection === "cells"
             foreground: root.bar.foreground

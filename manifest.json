@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "bhj.terminal-opacity",
   "name": "Terminal opacity",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "author": "bhj",
   "description": "A slider for the background opacity of every terminal, or of one window, live as you drag. Text stays solid.",
   "kinds": [

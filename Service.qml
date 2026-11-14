@@ -73,6 +73,14 @@ Item {
     send("cells " + (on ? "on" : "off"))
   }
 
+  // Turns on Hyprland's blur through Omarchy's Glassy look. Only on request,
+  // since it changes the whole desktop.
+  property bool switchingGlassy: false
+  function turnOnGlassy() {
+    switchingGlassy = true
+    send("glassy")
+  }
+
   // Shown at once; the backend's answer confirms it.
   function setBlur(target, on) {
     if (target === "all") blur = on
@@ -93,6 +101,7 @@ Item {
     blur = data.blur === true
     cells = data.cells === true
     blurAvailable = data.blurAvailable === true
+    switchingGlassy = false
     note = String(data.note || "")
     error = String(data.error || "")
   }

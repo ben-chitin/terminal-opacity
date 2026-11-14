@@ -67,6 +67,7 @@ declare -A OV=()    # window address -> opacity override
 declare -A OVPID=() # window address -> pid the override was saved for
 BLUR=0              # 1 when what shows through a terminal is blurred
 CELLS=0             # 1 when backgrounds that programs paint fade too
+CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
 
@@ -85,6 +86,7 @@ load_state() {
   OVPID=()
   BLUR=0
   CELLS=0
+  CELLS_CHANGES=""
   BOV=()
   BOVPID=()
   [[ -f $STATE ]] || return 0
@@ -94,6 +96,7 @@ load_state() {
       default) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && DEFAULT=$a ;;
       blur) BLUR=1 ;;
       cells) CELLS=1 ;;
+      cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
         if [[ $c =~ ^[0-9]+$ ]] && (( c <= 100 )); then
@@ -110,6 +113,7 @@ load_state() {
     (if (.default | type) == "number" then "default\t\(.default)" else empty end),
     (if .blur == true then "blur" else empty end),
     (if .cells == true then "cells" else empty end),
+    ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
       | "window\t\(.key)\t\(.value.pid)\t\(.value.opacity // "-")\t\(
@@ -132,9 +136,10 @@ save_state() {
     sep=","
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
-  printf '{"default":%s,"blur":%s,"cells":%s,"windows":{%s}}\n' "${DEFAULT:-null}" \
+  local changes=${CELLS_CHANGES// /,}
+  printf '{"default":%s,"blur":%s,"cells":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -469,8 +474,8 @@ unwire() {
 # --- Windows -----------------------------------------------------------------
 
 declare -a W_ORDER=()
-declare -A W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=()
-declare -A PID_EMU=() PID_NAME=() PID_COUNT=() PTS=()
+declare -A W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=() W_STALE=()
+declare -A PID_EMU=() PID_NAME=() PID_COUNT=() PTS=() PID_START=()
 declare -A PINNED=() SEEN=() NO_BLUR=()
 FOCUSED_ADDR=""
 BLUR_AVAILABLE=false
@@ -539,6 +544,48 @@ foot_pts() {
   printf '%s' "$found"
 }
 
+# When a process started, in epoch seconds: boot time plus its start tick.
+# Foot reads its config then, so a window started before the painted
+# backgrounds choice last changed still draws the old one.
+BOOT_TIME=""
+CLK_TCK=""
+pid_start() {
+  local pid=$1 stat
+  local -a fields
+  if [[ -z ${PID_START[$pid]:-} ]]; then
+    if [[ -z $BOOT_TIME ]]; then
+      BOOT_TIME=$(awk '/^btime/ {print $2}' /proc/stat 2>/dev/null)
+      CLK_TCK=$(getconf CLK_TCK 2>/dev/null)
+      [[ $BOOT_TIME =~ ^[0-9]+$ ]] || BOOT_TIME=0
+      [[ $CLK_TCK =~ ^[0-9]+$ ]] && (( CLK_TCK > 0 )) || CLK_TCK=100
+    fi
+    { stat=$(</proc/"$pid"/stat); } 2>/dev/null || { printf '%s' 0; return; }
+    read -r -a fields <<<"${stat##*) }"
+    PID_START[$pid]=$((BOOT_TIME + ${fields[19]:-0} / CLK_TCK))
+  fi
+  printf '%s' "${PID_START[$pid]}"
+}
+
+# A Foot process draws painted backgrounds the way the choice stood when it
+# started: it is behind when the choice changed an odd number of times since.
+foot_stale() {
+  local start t flips=0
+  start=$(pid_start "$1")
+  (( start > 0 )) || return 1
+  for t in $CELLS_CHANGES; do
+    (( t >= start )) && flips=$((flips + 1))
+  done
+  (( flips % 2 == 1 ))
+}
+
+mark_stale() {
+  local addr
+  for addr in "${W_ORDER[@]}"; do
+    W_STALE[$addr]=false
+    [[ ${W_EMU[$addr]} == foot && -n $CELLS_CHANGES ]] && foot_stale "${W_PID[$addr]}" && W_STALE[$addr]=true
+  done
+}
+
 scan() {
   local clients row addr pid class tagged focused fs ws title
   clients=$(timeout 2 hyprctl clients -j 2>/dev/null) || clients='[]'
@@ -546,7 +593,7 @@ scan() {
   BLUR_AVAILABLE=$(timeout 2 hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r '.bool == true' 2>/dev/null)
   [[ $BLUR_AVAILABLE == true ]] || BLUR_AVAILABLE=false
   W_ORDER=()
-  W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=()
+  W_PID=() W_EMU=() W_NAME=() W_TITLE=() W_WS=() W_FOCUSED=() W_FS=() W_SHARED=() W_STALE=()
   PID_COUNT=()
   CONFIG_OPACITY=()
   FOCUSED_ADDR=""
@@ -582,7 +629,7 @@ scan() {
   # A process that closed takes its cached details with it.
   local known
   for known in "${!PID_EMU[@]}"; do
-    [[ -d /proc/$known ]] || unset "PID_EMU[$known]" "PID_NAME[$known]" "PTS[$known]"
+    [[ -d /proc/$known ]] || unset "PID_EMU[$known]" "PID_NAME[$known]" "PTS[$known]" "PID_START[$known]"
   done
 
   # Hyprland reuses addresses, so an override is only for the process it was
@@ -612,6 +659,7 @@ scan() {
   for addr in "${W_ORDER[@]}"; do
     (( ${PID_COUNT[${W_PID[$addr]}]} > 1 )) && W_SHARED[$addr]=true || W_SHARED[$addr]=false
   done
+  mark_stale
   return $dropped
 }
 
@@ -833,7 +881,7 @@ emit_state() {
     rows+="$addr$US${W_TITLE[$addr]}$US${W_NAME[$addr]}$US${W_EMU[$addr]}$US$(value_of "$addr")$US"
     rows+="$([[ -n ${OV[$addr]:-} ]] && printf true || printf false)$US${W_FOCUSED[$addr]}$US${W_FS[$addr]}$US"
     rows+="${W_SHARED[$addr]}$US${W_WS[$addr]}$US$(blur_of "$addr")$US"
-    rows+="$([[ -n ${BOV[$addr]:-} ]] && printf true || printf false)"$'\n'
+    rows+="$([[ -n ${BOV[$addr]:-} ]] && printf true || printf false)$US${W_STALE[$addr]:-false}"$'\n'
   done
   local shown=$DEFAULT
   [[ -n $shown ]] || shown=$(config_opacity foot)
@@ -856,6 +904,7 @@ emit_state() {
         focused: (.[6] == "true"), fullscreen: (.[7] == "true"),
         shared: (.[8] == "true"), workspace: .[9],
         blur: (.[10] == "1"), blurOverride: (.[11] == "true"),
+        stale: (.[12] == "true"),
         solidText: (.[3] != "other")
       }]
     }' <<<"$rows"
@@ -994,9 +1043,43 @@ cmd_blur() {
   queue_blur_all
   flush_props
   if (( want )) && [[ $BLUR_AVAILABLE != true ]]; then
-    NOTE="Hyprland's blur is off, so nothing blurs yet. Omarchy's Glassy look turns it on."
+    NOTE="Hyprland's blur is off, so nothing blurs yet. \"Turn on Hyprland's blur\" below fixes that."
   fi
   return 0
+}
+
+# Hyprland blurs nothing while its own blur is off, which is Omarchy's
+# default. Omarchy's Glassy window look is what turns it on. It changes the
+# whole desktop (the bar and menus blur too), so it is only ever done when
+# asked for.
+cmd_glassy() {
+  if ! command -v omarchy >/dev/null 2>&1; then
+    ERROR="Turn on decoration:blur:enabled in your Hyprland config; the omarchy command isn't here to do it."
+    return 1
+  fi
+  if ! omarchy hyprland window transparency glassy >/dev/null 2>&1; then
+    ERROR="Omarchy couldn't switch to the Glassy look. Try: omarchy hyprland window transparency glassy"
+    return 1
+  fi
+  local i on=false
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    on=$(timeout 2 hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r '.bool == true' 2>/dev/null)
+    [[ $on == true ]] && break
+    sleep 0.3
+  done
+  # Glassy rewrites each terminal's theme background, so put this widget's back.
+  cmd_reapply
+  if [[ $on == true ]]; then
+    NOTE="Hyprland's blur is on (Omarchy's Glassy look). To undo: omarchy hyprland window transparency transparent"
+  else
+    ERROR="Glassy is set, but Hyprland's blur is still off. Check: hyprctl configerrors"
+    return 1
+  fi
+  return 0
+}
+
+blur_available() {
+  [[ $(timeout 2 hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r '.bool == true' 2>/dev/null) == true ]]
 }
 
 # Choose whether backgrounds that programs paint fade along with the
@@ -1017,7 +1100,15 @@ cmd_cells() {
   load_state
   scan
   [[ -n $want ]] || want=$((CELLS ? 0 : 1))
+  if (( want != CELLS )); then
+    # Only changes newer than the oldest open Foot can matter; keep a few.
+    local -a kept=($CELLS_CHANGES)
+    kept+=("$(date +%s)")
+    (( ${#kept[@]} > 16 )) && kept=("${kept[@]: -16}")
+    CELLS_CHANGES="${kept[*]}"
+  fi
   CELLS=$want
+  mark_stale
   save_state
   unlock_state
   kitty_colors_template
@@ -1067,10 +1158,10 @@ cmd_cells() {
     if (( kitty )) && [[ -z $(kitty_colors) ]]; then
       NOTE="Kitty fades only the colours listed in ~/.config/kitty/transparency-colors, which is empty."
     elif (( foot )); then
-      NOTE="Foot reads this when a window opens, so open Foot windows keep theirs solid."
+      NOTE="Foot reads this when a window opens: reopen the Foot windows marked \"reopen to apply\"."
     fi
   elif (( foot )); then
-    NOTE="Foot windows opened while this was on keep fading painted backgrounds until they close."
+    NOTE="Foot windows opened while this was on keep fading painted backgrounds until they're reopened."
   fi
   return 0
 }
@@ -1234,6 +1325,12 @@ cmd_install() {
     '# Put the Terminal opacity widget'"'"'s values back.' \
     "exec \"$PLUGIN_DIR/terminal-opacity\" reapply >/dev/null 2>&1" >"$HOOK"
   chmod 755 "$HOOK"
+  # Version 1's hook ran terminal-opacity.sh, which is gone: it fails quietly
+  # on every theme change.
+  local old="${HOOK%/*}/20-terminal-transparency"
+  if [[ -f $old ]] && grep -q 'bhj\.terminal-opacity/terminal-opacity\.sh' "$old" 2>/dev/null; then
+    rm -f "$old" && echo "Removed version 1's theme-set hook ($old)."
+  fi
   if command -v omarchy >/dev/null 2>&1 &&
     ! jq -e --arg id "$WIDGET_ID" '[.bar.layout[]?[]? | select(.id == $id)] | length > 0' \
       "$CONFIG_DIR/omarchy/shell.json" >/dev/null 2>&1; then
@@ -1242,6 +1339,12 @@ cmd_install() {
       echo "Add the widget yourself: omarchy bar put $WIDGET_ID" >&2
   fi
   echo "Terminal opacity is installed: the widget is in the bar and theme changes keep its values."
+  if command -v hyprctl >/dev/null 2>&1 && ! blur_available; then
+    echo
+    echo "Note: Hyprland's blur is off (Omarchy's default), so \"Blur what shows through\" can't blur yet."
+    echo "Turn it on from the widget's panel, or run: terminal-opacity glassy"
+    echo "(That switches Omarchy to its Glassy look, which blurs the bar and menus too.)"
+  fi
 }
 
 cmd_uninstall() {
@@ -1276,6 +1379,7 @@ cmd_serve() {
         reset) cmd_reset; cmd_sync; emit_state ;;
         blur) cmd_blur "${a:-}" "${b:-}"; emit_state ;;
         cells) cmd_cells "${a:-}"; emit_state ;;
+        glassy) cmd_glassy; emit_state ;;
         quit) break ;;
       esac
     elif (( $? > 128 )); then
@@ -1297,6 +1401,7 @@ Usage: terminal-opacity <command>
   blur <all|focused|address> <on|off|toggle>
                                    Blur what shows through (off at first)
   cells <on|off|toggle>            Fade backgrounds that programs paint, too
+  glassy                           Turn on Hyprland's blur (Omarchy's Glassy look)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme
@@ -1339,6 +1444,12 @@ case "$command" in
   cells)
     (( $# == 1 )) || usage
     cmd_cells "$1"
+    status=$?
+    emit_state
+    exit $status
+    ;;
+  glassy)
+    cmd_glassy
     status=$?
     emit_state
     exit $status
