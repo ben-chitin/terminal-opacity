@@ -35,6 +35,9 @@ The panel: the slider, the two switches, and what the slider applies to.
 - **Fade painted backgrounds too** fades the solid colours that programs
   paint, such as the panels of a CLI harness. It is one choice for every
   terminal, and off at first.
+- **Frost bar dropdowns** makes every bar dropdown 80% solid with blur
+  behind it, the same glass as the terminals (see
+  [Frosted dropdowns](#frosted-dropdowns)). Off at first.
 - **Follow the theme again** forgets the opacity saved here. It leaves the
   blur choice alone.
 
@@ -59,6 +62,27 @@ terminal-opacity glassy
 ```
 
 To go back: `omarchy hyprland window transparency transparent`.
+
+## Frosted dropdowns
+
+Omarchy's bar dropdowns are solid in most themes. **Frost bar dropdowns** sets
+their `[popups] background-alpha` in `~/.config/omarchy/shell.toml`, which
+Omarchy lays over every theme and the shell rereads live, so it survives theme
+changes. With Hyprland's blur on, what is behind a dropdown shows through
+frosted; with it off, sharp, and the panel offers the **Turn on Hyprland's
+blur** button.
+
+The widget writes one line, marked `# bhj.terminal-opacity`, last in the
+`[popups]` section, and leaves the rest of the file alone. Turning it off takes
+that line out again, handing the dropdowns back to your own setting or the
+theme. Fully solid would leave nothing to blur, and below 30% Glassy stops
+blurring, so the command takes 30 to 100:
+
+```sh
+terminal-opacity frost on      # 80%, or the last value
+terminal-opacity frost 70
+terminal-opacity frost off
+```
 
 ## Painted backgrounds
 
@@ -134,8 +158,8 @@ The first change adds one include line to each terminal config that exists
 `transparency*` file beside it. Ghostty's include also turns off its
 "Reloaded the configuration" toast, which would otherwise show on every step.
 
-`terminal-opacity uninstall` removes the hook, the saved state and those
-includes.
+`terminal-opacity uninstall` removes the hook, the saved state, those
+includes and the dropdown frost line.
 
 ## Command line
 
@@ -147,6 +171,7 @@ terminal-opacity blur all on
 terminal-opacity blur focused toggle
 terminal-opacity cells on
 terminal-opacity glassy
+terminal-opacity frost on
 terminal-opacity colors grok
 terminal-opacity nudge focused -5
 terminal-opacity reapply

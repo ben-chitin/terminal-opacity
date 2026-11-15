@@ -55,6 +55,14 @@ US=$'\x1f'
 # is never taken all the way to invisible.
 WINDOW_FLOOR=10
 
+# Frosted bar dropdowns: the shell's [popups] background-alpha, set in the
+# user's own shell.toml, which Omarchy lays over every theme and the shell
+# rereads live. Below 30% Hyprland's Glassy layer rule stops blurring it.
+SHELL_TOML="$CONFIG_DIR/omarchy/shell.toml"
+FROST_MARK="# $WIDGET_ID"
+FROST_DEFAULT=80
+FROST_MIN=30
+
 # Apps that hold a pty without being a terminal emulator.
 NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
 
@@ -67,6 +75,7 @@ declare -A OV=()    # window address -> opacity override
 declare -A OVPID=() # window address -> pid the override was saved for
 BLUR=0              # 1 when what shows through a terminal is blurred
 CELLS=0             # 1 when backgrounds that programs paint fade too
+FROST=""            # bar dropdown opacity percent while frosted, empty when the theme decides
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
@@ -86,6 +95,7 @@ load_state() {
   OVPID=()
   BLUR=0
   CELLS=0
+  FROST=""
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
@@ -96,6 +106,7 @@ load_state() {
       default) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && DEFAULT=$a ;;
       blur) BLUR=1 ;;
       cells) CELLS=1 ;;
+      frost) [[ $a =~ ^[0-9]+$ ]] && (( a >= FROST_MIN && a <= 100 )) && FROST=$a ;;
       cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
@@ -113,6 +124,7 @@ load_state() {
     (if (.default | type) == "number" then "default\t\(.default)" else empty end),
     (if .blur == true then "blur" else empty end),
     (if .cells == true then "cells" else empty end),
+    (if (.frost | type) == "number" then "frost\t\(.frost | floor)" else empty end),
     ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
@@ -137,9 +149,9 @@ save_state() {
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
   local changes=${CELLS_CHANGES// /,}
-  printf '{"default":%s,"blur":%s,"cells":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
+  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "$changes" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "${FROST:-null}" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -885,7 +897,7 @@ emit_state() {
   done
   local shown=$DEFAULT
   [[ -n $shown ]] || shown=$(config_opacity foot)
-  jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" \
+  jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" '
     {
       type: "state",
@@ -897,6 +909,8 @@ emit_state() {
       default: $shown,
       blur: ($blur == "1"),
       cells: ($cells == "1"),
+      frost: ($frost != ""),
+      frostOpacity: (if $frost == "" then null else ($frost | tonumber) end),
       blurAvailable: ($blurAvailable == "true"),
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
@@ -1044,6 +1058,88 @@ cmd_blur() {
   flush_props
   if (( want )) && [[ $BLUR_AVAILABLE != true ]]; then
     NOTE="Hyprland's blur is off, so nothing blurs yet. \"Turn on Hyprland's blur\" below fixes that."
+  fi
+  return 0
+}
+
+# Puts this widget's one line in [popups] of the user's shell.toml, or takes
+# it out when given nothing. Every other line in the file is left as it is.
+# The line goes last in the section, so it wins over one the user wrote, and
+# taking it out hands the dropdowns back to that line or the theme.
+write_frost() {
+  local percent=${1:-} alpha="" tmp
+  [[ -n $percent ]] && alpha=$(printf '%d.%02d' $((percent / 100)) $((percent % 100)))
+  [[ -f $SHELL_TOML || -n $alpha ]] || return 0
+  mkdir -p "${SHELL_TOML%/*}" || return 1
+  tmp=$(mktemp "${SHELL_TOML%/*}/.shell.toml.XXXXXX") || return 1
+  {
+    [[ -f $SHELL_TOML ]] && cat "$SHELL_TOML"
+  } | awk -v alpha="$alpha" -v mark="$FROST_MARK" '
+    function is_header(l) { return l ~ /^[[:space:]]*\[[^]]+\][[:space:]]*($|#)/ }
+    function is_popups(l) { return l ~ /^[[:space:]]*\[popups\][[:space:]]*($|#)/ }
+    function is_setting(l) { return l !~ /^[[:space:]]*($|#)/ }
+    index($0, mark) { next }
+    { line[++n] = $0 }
+    END {
+      start = 0; stop = n
+      for (i = 1; i <= n; i++) if (is_popups(line[i])) { start = i; break }
+      if (start) for (i = start + 1; i <= n; i++) if (is_header(line[i])) { stop = i - 1; break }
+      ours = "background-alpha = " alpha "  " mark ": Frost bar dropdowns"
+      if (alpha != "" && start) {
+        last = start
+        for (i = start + 1; i <= stop; i++) if (is_setting(line[i])) last = i
+        for (i = 1; i <= n; i++) { print line[i]; if (i == last) print ours }
+      } else if (alpha != "") {
+        for (i = 1; i <= n; i++) print line[i]
+        if (n && line[n] !~ /^[[:space:]]*$/) print ""
+        print "[popups]"
+        print ours
+      } else {
+        # A [popups] left with no settings means nothing; drop it.
+        empty = start
+        if (start) for (i = start + 1; i <= stop; i++) if (is_setting(line[i])) { empty = 0; break }
+        for (i = 1; i <= n; i++) {
+          if (empty && i == start) continue
+          print line[i]
+        }
+      }
+    }' >"$tmp"
+  if ! grep -q '[^[:space:]]' "$tmp"; then
+    rm -f "$tmp" "$SHELL_TOML"
+    return 0
+  fi
+  mv -f "$tmp" "$SHELL_TOML"
+}
+
+# Frost the bar's dropdowns: see-through enough for Hyprland to blur what is
+# behind them, solid enough to read. Not about terminals, but the same look.
+cmd_frost() {
+  local want=""
+  lock_state
+  load_state
+  case "${1:-}" in
+    on | true) want=${FROST:-$FROST_DEFAULT} ;;
+    off | false) want=off ;;
+    toggle) [[ -n $FROST ]] && want=off || want=$FROST_DEFAULT ;;
+    *)
+      if [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 >= FROST_MIN && $1 <= 100 )); then
+        want=$1
+      else
+        unlock_state
+        ERROR="Frosted dropdowns are on, off, toggle or a percent from $FROST_MIN to 100."
+        return 1
+      fi
+      ;;
+  esac
+  [[ $want == off ]] && FROST="" || FROST=$want
+  save_state
+  unlock_state
+  if ! write_frost "$FROST"; then
+    ERROR="Couldn't write $SHELL_TOML."
+    return 1
+  fi
+  if [[ -n $FROST ]] && ! blur_available; then
+    NOTE="Dropdowns are see-through, but Hyprland's blur is off. \"Turn on Hyprland's blur\" fixes that."
   fi
   return 0
 }
@@ -1356,8 +1452,9 @@ cmd_uninstall() {
   queue_blur_all
   flush_props
   unwire
+  write_frost ""
   rm -f "$HOOK" "$STATE"
-  echo "Terminal opacity's hook, state and config includes are removed."
+  echo "Terminal opacity's hook, state, config includes and dropdown frost are removed."
   echo "Take the widget out of the bar in ~/.config/omarchy/shell.json, then delete $PLUGIN_DIR."
 }
 
@@ -1380,6 +1477,7 @@ cmd_serve() {
         blur) cmd_blur "${a:-}" "${b:-}"; emit_state ;;
         cells) cmd_cells "${a:-}"; emit_state ;;
         glassy) cmd_glassy; emit_state ;;
+        frost) cmd_frost "${a:-}"; cmd_sync; emit_state ;;
         quit) break ;;
       esac
     elif (( $? > 128 )); then
@@ -1402,6 +1500,7 @@ Usage: terminal-opacity <command>
                                    Blur what shows through (off at first)
   cells <on|off|toggle>            Fade backgrounds that programs paint, too
   glassy                           Turn on Hyprland's blur (Omarchy's Glassy look)
+  frost <on|off|toggle|30-100>     Frost the bar's dropdowns (80% solid when on)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme
@@ -1451,6 +1550,14 @@ case "$command" in
   glassy)
     cmd_glassy
     status=$?
+    emit_state
+    exit $status
+    ;;
+  frost)
+    (( $# == 1 )) || usage
+    cmd_frost "$1"
+    status=$?
+    cmd_sync
     emit_state
     exit $status
     ;;

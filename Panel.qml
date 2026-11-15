@@ -20,13 +20,15 @@ Panel {
   // The blur of whatever the panel is pointed at.
   readonly property bool blur: selectedWindow ? selectedWindow.blur : defaultBlur
   readonly property bool cells: service ? service.cells : false
+  readonly property bool frost: service ? service.frost : false
+  readonly property int frostOpacity: service ? service.frostOpacity : 80
   readonly property bool mixedBlur: {
     for (var i = 0; i < windows.length; i++) if (windows[i].blur !== defaultBlur) return true
     return false
   }
   readonly property bool blurAvailable: service ? service.blurAvailable : false
   // Blur is wanted for what the panel points at, but Hyprland blurs nothing.
-  readonly property bool needsGlassy: (blur || defaultBlur) && !blurAvailable
+  readonly property bool needsGlassy: (blur || defaultBlur || frost) && !blurAvailable
   readonly property bool switchingGlassy: service ? service.switchingGlassy : false
   // Foot windows that started before the painted-backgrounds choice last
   // changed, and so still draw the old one.
@@ -180,28 +182,27 @@ Panel {
     if (service) service.setCells(!cells)
   }
 
+  function toggleFrost() {
+    if (service) service.setFrost(!frost)
+  }
+
   function turnOnGlassy() {
     if (service && !switchingGlassy) service.turnOnGlassy()
   }
 
-  // Top to bottom: the slider, the two switches (with the Glassy button
-  // between them while Hyprland's blur is off), then the rows.
+  // Top to bottom: the slider, the switches (then the Glassy button while
+  // Hyprland's blur is off and something wants it), then the rows.
+  readonly property var sections: needsGlassy
+    ? ["slider", "blur", "cells", "frost", "glassy"]
+    : ["slider", "blur", "cells", "frost"]
+
   function moveCursor(delta) {
-    if (focusSection === "slider") {
-      if (delta > 0) focusSection = "blur"
-      return
-    }
-    if (focusSection === "blur") {
-      focusSection = delta < 0 ? "slider" : (needsGlassy ? "glassy" : "cells")
-      return
-    }
-    if (focusSection === "glassy") {
-      focusSection = delta < 0 ? "blur" : "cells"
-      return
-    }
-    if (focusSection === "cells") {
-      if (delta < 0) {
-        focusSection = needsGlassy ? "glassy" : "blur"
+    if (focusSection !== "rows") {
+      var at = sections.indexOf(focusSection)
+      var to = at + delta
+      if (to < 0) return
+      if (to < sections.length) {
+        focusSection = sections[to]
       } else if (rows.length) {
         focusSection = "rows"
         selectedIndex = 0
@@ -211,7 +212,7 @@ Panel {
     }
     var next = selectedIndex + delta
     if (next < 0) {
-      focusSection = "cells"
+      focusSection = sections[sections.length - 1]
       selectedIndex = -1
       return
     }
@@ -243,6 +244,10 @@ Panel {
       turnOnGlassy()
       return
     }
+    if (focusSection === "frost") {
+      toggleFrost()
+      return
+    }
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -265,7 +270,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onWindowsChanged: follow()
-  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "blur"
+  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "frost"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -483,6 +488,55 @@ Panel {
             onClicked: root.toggleBlur()
           }
 
+          Toggle {
+            id: cellsToggle
+            width: parent.width
+            label: "Fade painted backgrounds too"
+            description: root.staleCount > 0
+              ? (root.staleCount === 1 ? "1 Foot window" : root.staleCount + " Foot windows")
+                + " opened before this changed. Reopen "
+                + (root.staleCount === 1 ? "it" : "them") + " to "
+                + (root.cells ? "fade painted backgrounds" : "keep painted backgrounds solid")
+              : root.cells
+                ? "Every terminal: colours that programs paint fade with the background"
+                : "Every terminal: colours that programs paint stay solid"
+            checked: root.cells
+            hasCursor: root.cursorActive && root.focusSection === "cells"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(cellsToggle)
+            onHovered: function(on) {
+              if (!on) return
+              root.cursorActive = true
+              root.focusSection = "cells"
+              root.selectedIndex = -1
+            }
+            onClicked: root.toggleCells()
+          }
+
+          Toggle {
+            id: frostToggle
+            width: parent.width
+            label: "Frost bar dropdowns"
+            description: root.frost && !root.blurAvailable
+              ? "See-through, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
+              : root.frost
+                ? "Every bar dropdown: " + root.frostOpacity + "% solid, with blur behind"
+                : "Every bar dropdown: as solid as the theme makes it"
+            checked: root.frost
+            hasCursor: root.cursorActive && root.focusSection === "frost"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(frostToggle)
+            onHovered: function(on) {
+              if (!on) return
+              root.cursorActive = true
+              root.focusSection = "frost"
+              root.selectedIndex = -1
+            }
+            onClicked: root.toggleFrost()
+          }
+
           // Hyprland's blur is off by default in Omarchy, and nothing this
           // widget asks for can blur until it is on.
           BorderSurface {
@@ -552,32 +606,6 @@ Panel {
               }
               onClicked: root.turnOnGlassy()
             }
-          }
-
-          Toggle {
-            id: cellsToggle
-            width: parent.width
-            label: "Fade painted backgrounds too"
-            description: root.staleCount > 0
-              ? (root.staleCount === 1 ? "1 Foot window" : root.staleCount + " Foot windows")
-                + " opened before this changed. Reopen "
-                + (root.staleCount === 1 ? "it" : "them") + " to "
-                + (root.cells ? "fade painted backgrounds" : "keep painted backgrounds solid")
-              : root.cells
-                ? "Every terminal: colours that programs paint fade with the background"
-                : "Every terminal: colours that programs paint stay solid"
-            checked: root.cells
-            hasCursor: root.cursorActive && root.focusSection === "cells"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(cellsToggle)
-            onHovered: function(on) {
-              if (!on) return
-              root.cursorActive = true
-              root.focusSection = "cells"
-              root.selectedIndex = -1
-            }
-            onClicked: root.toggleCells()
           }
 
           PanelSeparator { foreground: root.bar.foreground }

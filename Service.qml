@@ -26,6 +26,9 @@ Item {
   property bool blurAvailable: false
   // Whether backgrounds that programs paint fade too. One choice for all.
   property bool cells: false
+  // Whether the bar's dropdowns are frosted, and how solid they are then.
+  property bool frost: false
+  property int frostOpacity: 80
   property string note: ""
   property string error: ""
   property bool ready: false
@@ -73,6 +76,11 @@ Item {
     send("cells " + (on ? "on" : "off"))
   }
 
+  function setFrost(on) {
+    frost = on
+    send("frost " + (on ? "on" : "off"))
+  }
+
   // Turns on Hyprland's blur through Omarchy's Glassy look. Only on request,
   // since it changes the whole desktop.
   property bool switchingGlassy: false
@@ -100,6 +108,8 @@ Item {
     defaultSet = data.defaultSet === true
     blur = data.blur === true
     cells = data.cells === true
+    frost = data.frost === true
+    if (typeof data.frostOpacity === "number") frostOpacity = data.frostOpacity
     blurAvailable = data.blurAvailable === true
     switchingGlassy = false
     note = String(data.note || "")
