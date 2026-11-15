@@ -4,6 +4,18 @@ An Omarchy bar widget with one slider for the background opacity of every
 terminal, or of one window. Terminals change live as the slider moves, and the
 text stays solid. 100% is a solid background, 0% is clear.
 
+![Two terminals at 49% opacity with the wallpaper showing through sharp](assets/opacity.png)
+
+The background at 49%, with what is behind showing through sharp.
+
+![The same terminals with the wallpaper blurred behind them](assets/opacity-blur.png)
+
+The same with **Blur what shows through** on.
+
+![The Terminal opacity panel open over the blurred terminals](assets/opacity-blur-panel.png)
+
+The panel: the slider, the two switches, and what the slider applies to.
+
 ## Using it
 
 - Click the bar icon, pick **All terminals** or one window, and drag.
