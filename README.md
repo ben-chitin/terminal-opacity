@@ -18,9 +18,11 @@ Programs that paint their own backgrounds keep them solid: Grok's whole
 screen on the left, OpenCode's input box on the right. The other shots have
 **Fade painted backgrounds too** on, which fades those with the rest.
 
-![The Terminal opacity panel open over the blurred terminals](assets/opacity-blur-panel.png)
+![The Terminal opacity panel, itself frosted, open over Grok and OpenCode at 38%](assets/frosted-panel.png)
 
-The panel: the slider, the two switches, and what the slider applies to.
+The panel: the slider, the switches, and what the slider applies to. Here
+**Frost bar dropdowns** is on and set to **Match terminals**, so the panel
+itself is 38% solid with blur behind it, like the terminals.
 
 ## Using it
 
@@ -35,9 +37,11 @@ The panel: the slider, the two switches, and what the slider applies to.
 - **Fade painted backgrounds too** fades the solid colours that programs
   paint, such as the panels of a CLI harness. It is one choice for every
   terminal, and off at first.
-- **Frost bar dropdowns** makes every bar dropdown 80% solid with blur
-  behind it, the same glass as the terminals (see
-  [Frosted dropdowns](#frosted-dropdowns)). Off at first.
+- **Frost bar dropdowns** makes every bar dropdown see-through with blur
+  behind it, the same glass as the terminals. While it is on, a **Dropdown
+  opacity** slider sets how solid they are, or **Match terminals** has them
+  follow the All terminals slider (see [Frosted dropdowns](#frosted-dropdowns)).
+  Off at first.
 - **Follow the theme again** forgets the opacity saved here. It leaves the
   blur choice alone.
 
@@ -72,15 +76,22 @@ changes. With Hyprland's blur on, what is behind a dropdown shows through
 frosted; with it off, sharp, and the panel offers the **Turn on Hyprland's
 blur** button.
 
+The **Dropdown opacity** slider goes from 30% to 100%: below 30% Glassy stops
+blurring, and fully solid leaves nothing to blur. **Its own** keeps the
+slider's value. **Match terminals** has the dropdowns follow the All terminals
+slider, live as it is dragged, and the theme's value when nothing is saved,
+held at 30% at the least. Dragging the dropdown slider goes back to its own
+value. Turning the switch off and on again brings back whichever was set.
+
 The widget writes one line, marked `# bhj.terminal-opacity`, last in the
 `[popups]` section, and leaves the rest of the file alone. Turning it off takes
 that line out again, handing the dropdowns back to your own setting or the
-theme. Fully solid would leave nothing to blur, and below 30% Glassy stops
-blurring, so the command takes 30 to 100:
+theme.
 
 ```sh
-terminal-opacity frost on      # 80%, or the last value
+terminal-opacity frost on      # 80% at first, then whatever was last set
 terminal-opacity frost 70
+terminal-opacity frost follow  # match the terminals
 terminal-opacity frost off
 ```
 

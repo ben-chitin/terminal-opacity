@@ -75,7 +75,9 @@ declare -A OV=()    # window address -> opacity override
 declare -A OVPID=() # window address -> pid the override was saved for
 BLUR=0              # 1 when what shows through a terminal is blurred
 CELLS=0             # 1 when backgrounds that programs paint fade too
-FROST=""            # bar dropdown opacity percent while frosted, empty when the theme decides
+FROST=""            # bar dropdowns while frosted: a percent, or "follow" to match the
+                    # terminals' default; empty when the theme decides
+FROST_LAST=""       # what it was before it was last turned off
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
@@ -96,6 +98,7 @@ load_state() {
   BLUR=0
   CELLS=0
   FROST=""
+  FROST_LAST=""
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
@@ -106,7 +109,14 @@ load_state() {
       default) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && DEFAULT=$a ;;
       blur) BLUR=1 ;;
       cells) CELLS=1 ;;
-      frost) [[ $a =~ ^[0-9]+$ ]] && (( a >= FROST_MIN && a <= 100 )) && FROST=$a ;;
+      frost)
+        if [[ $a == follow ]]; then
+          FROST=follow
+        elif [[ $a =~ ^[0-9]+$ ]] && (( a >= FROST_MIN && a <= 100 )); then
+          FROST=$a
+        fi
+        ;;
+      frostLast) [[ $a == follow || ( $a =~ ^[0-9]+$ && $a -ge $FROST_MIN && $a -le 100 ) ]] && FROST_LAST=$a ;;
       cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
@@ -124,13 +134,24 @@ load_state() {
     (if (.default | type) == "number" then "default\t\(.default)" else empty end),
     (if .blur == true then "blur" else empty end),
     (if .cells == true then "cells" else empty end),
-    (if (.frost | type) == "number" then "frost\t\(.frost | floor)" else empty end),
+    (if (.frost | type) == "number" then "frost\t\(.frost | floor)"
+     elif .frost == "follow" then "frost\tfollow" else empty end),
+    (if (.frostLast | type) == "number" then "frostLast\t\(.frostLast | floor)"
+     elif .frostLast == "follow" then "frostLast\tfollow" else empty end),
     ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
       | "window\t\(.key)\t\(.value.pid)\t\(.value.opacity // "-")\t\(
           if .value.blur == true then "on" elif .value.blur == false then "off" else "-" end)")
   ' "$STATE" 2>/dev/null)
+}
+
+frost_json() {
+  case "${1-$FROST}" in
+    "") printf null ;;
+    follow) printf '"follow"' ;;
+    *) printf '%s' "${1-$FROST}" ;;
+  esac
 }
 
 # Addresses, pids and percents are all validated, so the JSON is built by hand.
@@ -149,9 +170,9 @@ save_state() {
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
   local changes=${CELLS_CHANGES// /,}
-  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
+  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "${FROST:-null}" "$changes" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -898,6 +919,7 @@ emit_state() {
   local shown=$DEFAULT
   [[ -n $shown ]] || shown=$(config_opacity foot)
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
+    --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" '
     {
       type: "state",
@@ -910,7 +932,8 @@ emit_state() {
       blur: ($blur == "1"),
       cells: ($cells == "1"),
       frost: ($frost != ""),
-      frostOpacity: (if $frost == "" then null else ($frost | tonumber) end),
+      frostFollow: ($frost == "follow"),
+      frostOpacity: (if $frostPercent == "" then null else ($frostPercent | tonumber) end),
       blurAvailable: ($blurAvailable == "true"),
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
@@ -946,6 +969,7 @@ cmd_preview() {
   mapfile -t addrs < <(targets_of "$target")
   (( ${#addrs[@]} )) || return 0
   apply "$opacity" 0 "$(is_all "$target" && printf 1 || printf 0)" "${addrs[@]}"
+  is_all "$target" && follow_frost "$opacity"
 }
 
 cmd_commit() {
@@ -971,6 +995,7 @@ cmd_commit() {
     RESTORE_EMU=()
     RESTORE_AT=0
     (( ${#addrs[@]} )) && apply "$opacity" 1 1 "${addrs[@]}"
+    follow_frost
   else
     if (( ${#addrs[@]} == 0 )); then
       unlock_state
@@ -1111,30 +1136,74 @@ write_frost() {
   mv -f "$tmp" "$SHELL_TOML"
 }
 
+# The dropdowns' opacity now: their own, or the terminals' default (or what
+# the theme gives Foot), kept within what Glassy still blurs.
+frost_percent() {
+  local v
+  if [[ $FROST == follow ]]; then
+    v=$DEFAULT
+    if [[ -z $v ]]; then
+      [[ -n ${FOOT_CONFIG_OPACITY:-} ]] || load_foot_config
+      v=$(config_opacity foot)
+    fi
+    [[ $v =~ ^[0-9]+$ ]] || v=$FROST_DEFAULT
+    clamp "$v" "$FROST_MIN" 100
+  else
+    printf '%s' "$FROST"
+  fi
+}
+
+# While the dropdowns match the terminals, a new default for every terminal
+# moves them too. A drag step can pass its own value; those are spaced out,
+# since each write makes the shell reread the file.
+FROST_WRITTEN_AT=0
+follow_frost() {
+  [[ $FROST == follow ]] || return 0
+  local percent
+  if [[ -n ${1:-} ]]; then
+    local now=${EPOCHREALTIME/[.,]/}
+    (( now - FROST_WRITTEN_AT >= 80000 )) || return 0
+    FROST_WRITTEN_AT=$now
+    percent=$(clamp "$1" "$FROST_MIN" 100)
+  else
+    percent=$(frost_percent)
+  fi
+  write_frost "$percent"
+}
+
 # Frost the bar's dropdowns: see-through enough for Hyprland to blur what is
 # behind them, solid enough to read. Not about terminals, but the same look.
 cmd_frost() {
   local want=""
   lock_state
   load_state
+  scan
   case "${1:-}" in
-    on | true) want=${FROST:-$FROST_DEFAULT} ;;
+    on | true) want=${FROST:-${FROST_LAST:-$FROST_DEFAULT}} ;;
     off | false) want=off ;;
-    toggle) [[ -n $FROST ]] && want=off || want=$FROST_DEFAULT ;;
+    toggle) [[ -n $FROST ]] && want=off || want=${FROST_LAST:-$FROST_DEFAULT} ;;
+    follow) want=follow ;;
     *)
       if [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 >= FROST_MIN && $1 <= 100 )); then
         want=$1
       else
         unlock_state
-        ERROR="Frosted dropdowns are on, off, toggle or a percent from $FROST_MIN to 100."
+        ERROR="Frosted dropdowns are on, off, toggle, follow or a percent from $FROST_MIN to 100."
         return 1
       fi
       ;;
   esac
-  [[ $want == off ]] && FROST="" || FROST=$want
+  if [[ $want == off ]]; then
+    [[ -n $FROST ]] && FROST_LAST=$FROST
+    FROST=""
+  else
+    FROST=$want
+  fi
   save_state
   unlock_state
-  if ! write_frost "$FROST"; then
+  local percent=""
+  [[ -n $FROST ]] && percent=$(frost_percent)
+  if ! write_frost "$percent"; then
     ERROR="Couldn't write $SHELL_TOML."
     return 1
   fi
@@ -1375,6 +1444,7 @@ cmd_reapply() {
     esac
   done
   restore_includes
+  follow_frost
 }
 
 # Forget the default and every override: terminals follow their theme again.
@@ -1412,6 +1482,9 @@ cmd_reset() {
   flush_props
   RESTORE_EMU=()
   RESTORE_AT=0
+  # The theme decides the terminals again, and so the dropdowns that match.
+  load_foot_config
+  follow_frost
 }
 
 cmd_install() {
@@ -1500,7 +1573,8 @@ Usage: terminal-opacity <command>
                                    Blur what shows through (off at first)
   cells <on|off|toggle>            Fade backgrounds that programs paint, too
   glassy                           Turn on Hyprland's blur (Omarchy's Glassy look)
-  frost <on|off|toggle|30-100>     Frost the bar's dropdowns (80% solid when on)
+  frost <on|off|toggle|follow|30-100>
+                                   Frost the bar's dropdowns; follow matches the terminals
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme

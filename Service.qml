@@ -29,6 +29,9 @@ Item {
   // Whether the bar's dropdowns are frosted, and how solid they are then.
   property bool frost: false
   property int frostOpacity: 80
+  // Whether that opacity follows the terminals' default instead of its own.
+  property bool frostFollow: false
+  property int frostPreviewValue: -1
   property string note: ""
   property string error: ""
   property bool ready: false
@@ -81,6 +84,26 @@ Item {
     send("frost " + (on ? "on" : "off"))
   }
 
+  function setFrostFollow(on) {
+    frostFollow = on
+    send("frost " + (on ? "follow" : Math.round(frostOpacity)))
+  }
+
+  // A drag step: the shell rereads its file on every write, so steps are
+  // spaced out and only the latest one goes.
+  function previewFrost(value) {
+    frostPreviewValue = Math.max(30, Math.min(100, Math.round(value)))
+    if (!frostTimer.running) frostTimer.start()
+  }
+
+  function commitFrost(value) {
+    frostTimer.stop()
+    frostPreviewValue = -1
+    frostFollow = false
+    frostOpacity = Math.max(30, Math.min(100, Math.round(value)))
+    send("frost " + frostOpacity)
+  }
+
   // Turns on Hyprland's blur through Omarchy's Glassy look. Only on request,
   // since it changes the whole desktop.
   property bool switchingGlassy: false
@@ -109,6 +132,7 @@ Item {
     blur = data.blur === true
     cells = data.cells === true
     frost = data.frost === true
+    frostFollow = data.frostFollow === true
     if (typeof data.frostOpacity === "number") frostOpacity = data.frostOpacity
     blurAvailable = data.blurAvailable === true
     switchingGlassy = false
@@ -140,6 +164,16 @@ Item {
     id: restartTimer
     interval: 1000
     onTriggered: daemon.running = true
+  }
+
+  Timer {
+    id: frostTimer
+    interval: 90
+    onTriggered: {
+      if (root.frostPreviewValue < 0) return
+      root.send("frost " + root.frostPreviewValue)
+      root.frostPreviewValue = -1
+    }
   }
 
   Timer {

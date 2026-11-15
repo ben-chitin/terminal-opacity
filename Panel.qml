@@ -22,6 +22,14 @@ Panel {
   readonly property bool cells: service ? service.cells : false
   readonly property bool frost: service ? service.frost : false
   readonly property int frostOpacity: service ? service.frostOpacity : 80
+  readonly property bool frostFollow: service ? service.frostFollow : false
+  // What the dropdowns show now, live while either slider is dragged.
+  readonly property int frostShown: {
+    if (frostSlider.dragging) return Math.round(frostSlider.liveValue)
+    if (frostFollow && selectedAddress === allAddress && opacitySlider.dragging)
+      return Math.max(30, Math.round(opacitySlider.liveValue))
+    return frostOpacity
+  }
   readonly property bool mixedBlur: {
     for (var i = 0; i < windows.length; i++) if (windows[i].blur !== defaultBlur) return true
     return false
@@ -166,6 +174,14 @@ Panel {
   }
 
   function adjust(delta) {
+    if (focusSection === "frostSlider") {
+      if (service) service.commitFrost(frostOpacity + delta)
+      return
+    }
+    if (focusSection === "frostMode") {
+      if (service && frostFollow !== (delta > 0)) service.setFrostFollow(delta > 0)
+      return
+    }
     commit(shownPercent + delta)
   }
 
@@ -192,9 +208,12 @@ Panel {
 
   // Top to bottom: the slider, the switches (then the Glassy button while
   // Hyprland's blur is off and something wants it), then the rows.
-  readonly property var sections: needsGlassy
-    ? ["slider", "blur", "cells", "frost", "glassy"]
-    : ["slider", "blur", "cells", "frost"]
+  readonly property var sections: {
+    var list = ["slider", "blur", "cells", "frost"]
+    if (frost) list.push("frostSlider", "frostMode")
+    if (needsGlassy) list.push("glassy")
+    return list
+  }
 
   function moveCursor(delta) {
     if (focusSection !== "rows") {
@@ -248,6 +267,11 @@ Panel {
       toggleFrost()
       return
     }
+    if (focusSection === "frostMode") {
+      if (service) service.setFrostFollow(!frostFollow)
+      return
+    }
+    if (focusSection === "frostSlider") return
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -271,6 +295,7 @@ Panel {
 
   onWindowsChanged: follow()
   onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "frost"
+  onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -281,6 +306,9 @@ Panel {
     selectedIndex = -1
     cursorActive = false
     shownPercent = opacityOf(allAddress)
+    // The panel can be taller than fits; open it at the top each time.
+    if (scrollArea && scrollArea.contentItem && scrollArea.contentItem.contentY !== undefined)
+      scrollArea.contentItem.contentY = 0
     if (service) service.sync()
   }
 
@@ -308,7 +336,8 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(520))
+    // As tall as everything in it, unless the screen is shorter; then it scrolls.
+    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -521,7 +550,8 @@ Panel {
             description: root.frost && !root.blurAvailable
               ? "See-through, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
               : root.frost
-                ? "Every bar dropdown: " + root.frostOpacity + "% solid, with blur behind"
+                ? (root.frostFollow ? "Every bar dropdown matches the terminals, with blur behind"
+                                    : "Every bar dropdown, with blur behind")
                 : "Every bar dropdown: as solid as the theme makes it"
             checked: root.frost
             hasCursor: root.cursorActive && root.focusSection === "frost"
@@ -535,6 +565,96 @@ Panel {
               root.selectedIndex = -1
             }
             onClicked: root.toggleFrost()
+          }
+
+          // The dropdowns' own opacity, or the terminals'. Glassy stops
+          // blurring below 30%, so the slider stops there.
+          Column {
+            visible: root.frost
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(frostHeader.implicitHeight, frostPercent.implicitHeight)
+
+              PanelSectionHeader {
+                id: frostHeader
+                text: "DROPDOWN OPACITY"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: frostPercent
+                textFormat: Text.PlainText
+                text: root.frostShown + "%"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            CursorSurface {
+              id: frostSliderSurface
+              width: parent.width
+              height: frostSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "frostSlider"
+              foreground: root.bar.foreground
+              outline: true
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(frostSliderSurface)
+
+              PanelSlider {
+                id: frostSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: 30
+                maximum: 100
+                step: 5
+                integer: true
+                value: root.frostShown
+                onMoved: function(v) { if (root.service) root.service.previewFrost(v) }
+                onReleased: function(v) { if (root.service) root.service.commitFrost(v) }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "frostSlider"
+                  root.selectedIndex = -1
+                }
+              }
+            }
+
+            ButtonGroup {
+              id: frostMode
+              width: parent.width
+              options: [
+                { value: "own", label: "Its own" },
+                { value: "follow", label: "Match terminals", tooltip: "Follows the All terminals slider" }
+              ]
+              value: root.frostFollow ? "follow" : "own"
+              focusable: false
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.caption
+              cursorIndex: root.cursorActive && root.focusSection === "frostMode" ? (root.frostFollow ? 0 : 1) : -1
+              onChanged: function(v) { if (root.service) root.service.setFrostFollow(v === "follow") }
+              onHovered: function(index, isHovered) {
+                if (!isHovered) return
+                root.cursorActive = true
+                root.focusSection = "frostMode"
+                root.selectedIndex = -1
+              }
+            }
           }
 
           // Hyprland's blur is off by default in Omarchy, and nothing this
