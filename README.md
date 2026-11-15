@@ -12,6 +12,12 @@ The background at 49%, with what is behind showing through sharp.
 
 The same with **Blur what shows through** on.
 
+![Grok and OpenCode with the backgrounds they paint left solid](assets/painted-solid.png)
+
+Programs that paint their own backgrounds keep them solid: Grok's whole
+screen on the left, OpenCode's input box on the right. The other shots have
+**Fade painted backgrounds too** on, which fades those with the rest.
+
 ![The Terminal opacity panel open over the blurred terminals](assets/opacity-blur-panel.png)
 
 The panel: the slider, the two switches, and what the slider applies to.
