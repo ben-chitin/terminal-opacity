@@ -67,6 +67,11 @@ terminal-opacity glassy
 
 To go back: `omarchy hyprland window transparency transparent`.
 
+**Foot needs a new window after blur is turned on.** Foot turns Hyprland's
+blur down unless its own config asks for it, and it reads that only when a
+window opens. Glassy adds the setting, so Foot windows that were open before
+it stay sharp whatever the switch says. Open a new one and it is blurred.
+
 ## Frosted dropdowns
 
 Omarchy's bar dropdowns are solid in most themes. **Frost bar dropdowns** sets
