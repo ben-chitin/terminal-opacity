@@ -23,6 +23,9 @@ Panel {
   readonly property bool frost: service ? service.frost : false
   readonly property int frostOpacity: service ? service.frostOpacity : 80
   readonly property bool frostFollow: service ? service.frostFollow : false
+  readonly property bool glass: service ? service.glass : false
+  readonly property string corners: service ? service.corners : "theme"
+  readonly property bool rounded: corners === "rounded"
   // What the dropdowns show now, live while either slider is dragged.
   readonly property int frostShown: {
     if (frostSlider.dragging) return Math.round(frostSlider.liveValue)
@@ -36,7 +39,7 @@ Panel {
   }
   readonly property bool blurAvailable: service ? service.blurAvailable : false
   // Blur is wanted for what the panel points at, but Hyprland blurs nothing.
-  readonly property bool needsGlassy: (blur || defaultBlur || frost) && !blurAvailable
+  readonly property bool needsGlassy: (blur || defaultBlur || frost || glass) && !blurAvailable
   readonly property bool switchingGlassy: service ? service.switchingGlassy : false
   // Foot windows that started before the painted-backgrounds choice last
   // changed, and so still draw the old one.
@@ -202,6 +205,14 @@ Panel {
     if (service) service.setFrost(!frost)
   }
 
+  function toggleGlass() {
+    if (service) service.setGlass(!glass)
+  }
+
+  function toggleCorners() {
+    if (service) service.setRounded(!rounded)
+  }
+
   function turnOnGlassy() {
     if (service && !switchingGlassy) service.turnOnGlassy()
   }
@@ -211,6 +222,7 @@ Panel {
   readonly property var sections: {
     var list = ["slider", "blur", "cells", "frost"]
     if (frost) list.push("frostSlider", "frostMode")
+    list.push("glass", "corners")
     if (needsGlassy) list.push("glassy")
     return list
   }
@@ -271,6 +283,14 @@ Panel {
       if (service) service.setFrostFollow(!frostFollow)
       return
     }
+    if (focusSection === "glass") {
+      toggleGlass()
+      return
+    }
+    if (focusSection === "corners") {
+      toggleCorners()
+      return
+    }
     if (focusSection === "frostSlider") return
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
@@ -294,7 +314,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onWindowsChanged: follow()
-  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "frost"
+  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "corners"
   onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
   onDefaultOpacityChanged: follow()
 
@@ -655,6 +675,54 @@ Panel {
                 root.selectedIndex = -1
               }
             }
+          }
+
+          // How Hyprland blurs, for everything it blurs, not just terminals.
+          Toggle {
+            id: glassToggle
+            width: parent.width
+            label: "Frosted glass"
+            description: root.glass && !root.blurAvailable
+              ? "Set, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
+              : root.glass
+                ? "A heavier, lighter blur behind terminals, the bar and menus"
+                : "Omarchy's own blur: softer, and it dims a little"
+            checked: root.glass
+            hasCursor: root.cursorActive && root.focusSection === "glass"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassToggle)
+            onHovered: function(on) {
+              if (!on) return
+              root.cursorActive = true
+              root.focusSection = "glass"
+              root.selectedIndex = -1
+            }
+            onClicked: root.toggleGlass()
+          }
+
+          // Omarchy's own corner setting, for every window.
+          Toggle {
+            id: cornersToggle
+            width: parent.width
+            label: "Round window corners"
+            description: root.rounded
+              ? "Every window, whatever the theme"
+              : root.corners === "sharp"
+                ? "Every window is forced square. On rounds them"
+                : "Every window: as the theme draws them"
+            checked: root.rounded
+            hasCursor: root.cursorActive && root.focusSection === "corners"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(cornersToggle)
+            onHovered: function(on) {
+              if (!on) return
+              root.cursorActive = true
+              root.focusSection = "corners"
+              root.selectedIndex = -1
+            }
+            onClicked: root.toggleCorners()
           }
 
           // Hyprland's blur is off by default in Omarchy, and nothing this

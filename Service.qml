@@ -32,6 +32,10 @@ Item {
   // Whether that opacity follows the terminals' default instead of its own.
   property bool frostFollow: false
   property int frostPreviewValue: -1
+  // Whether Hyprland's blur is the heavier, lighter frosted glass, and
+  // Omarchy's window corners: "rounded", "sharp", or "theme".
+  property bool glass: false
+  property string corners: "theme"
   property string note: ""
   property string error: ""
   property bool ready: false
@@ -112,6 +116,18 @@ Item {
     send("glassy")
   }
 
+  // Both reload Hyprland, so they are shown at once and the backend's answer
+  // confirms them.
+  function setGlass(on) {
+    glass = on
+    send("glass " + (on ? "on" : "off"))
+  }
+
+  function setRounded(on) {
+    corners = on ? "rounded" : "theme"
+    send("corners " + (on ? "on" : "off"))
+  }
+
   // Shown at once; the backend's answer confirms it.
   function setBlur(target, on) {
     if (target === "all") blur = on
@@ -135,6 +151,8 @@ Item {
     frostFollow = data.frostFollow === true
     if (typeof data.frostOpacity === "number") frostOpacity = data.frostOpacity
     blurAvailable = data.blurAvailable === true
+    glass = data.glass === true
+    if (typeof data.corners === "string") corners = data.corners
     switchingGlassy = false
     note = String(data.note || "")
     error = String(data.error || "")

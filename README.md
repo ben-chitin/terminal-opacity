@@ -42,6 +42,11 @@ itself is 38% solid with blur behind it, like the terminals.
   opacity** slider sets how solid they are, or **Match terminals** has them
   follow the All terminals slider (see [Frosted dropdowns](#frosted-dropdowns)).
   Off at first.
+- **Frosted glass** makes Hyprland's blur heavier and brighter, so what is
+  behind a terminal, the bar or a menu reads as frosted glass rather than a
+  dimmed smudge (see [Frosted glass](#frosted-glass)). Off at first.
+- **Round window corners** turns on Omarchy's rounded corners for every
+  window, whatever the theme. Off hands the corners back to the theme.
 - **Follow the theme again** forgets the opacity saved here. It leaves the
   blur choice alone.
 
@@ -98,6 +103,35 @@ terminal-opacity frost on      # 80% at first, then whatever was last set
 terminal-opacity frost 70
 terminal-opacity frost follow  # match the terminals
 terminal-opacity frost off
+```
+
+## Frosted glass
+
+Omarchy's Glassy blur is soft and dims what is behind it a little. **Frosted
+glass** swaps in a heavier, brighter blur: size 10 over 3 passes, brightness
+1.15, more vibrancy and a little grain. It is Hyprland's one blur, so it
+changes everything Hyprland blurs: terminals, the bar, menus and frosted
+dropdowns. Like them, it needs Hyprland's blur on (see [Blur](#blur)).
+
+The switch writes `~/.local/state/omarchy/toggles/hypr/zz-bhj-terminal-opacity-glass.lua`,
+which Omarchy loads after its own toggles, so it wins over Glassy's settings
+and survives theme changes. Turning it off deletes the file. Either way
+Hyprland reloads; if it reports a config error the file is taken out again.
+
+```sh
+terminal-opacity glass on
+terminal-opacity glass off
+```
+
+## Round corners
+
+**Round window corners** is Omarchy's own setting, `omarchy hyprland corners`,
+from the panel: on forces rounded corners on every window, off goes back to
+whatever the theme draws. `uninstall` leaves it as it is.
+
+```sh
+terminal-opacity corners on    # omarchy hyprland corners rounded
+terminal-opacity corners off   # omarchy hyprland corners theme
 ```
 
 ## Painted backgrounds
@@ -175,7 +209,7 @@ The first change adds one include line to each terminal config that exists
 "Reloaded the configuration" toast, which would otherwise show on every step.
 
 `terminal-opacity uninstall` removes the hook, the saved state, those
-includes and the dropdown frost line.
+includes, the dropdown frost line and the frosted glass file.
 
 ## Command line
 
@@ -188,6 +222,8 @@ terminal-opacity blur focused toggle
 terminal-opacity cells on
 terminal-opacity glassy
 terminal-opacity frost on
+terminal-opacity glass toggle
+terminal-opacity corners toggle
 terminal-opacity colors grok
 terminal-opacity nudge focused -5
 terminal-opacity reapply

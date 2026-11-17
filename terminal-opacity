@@ -63,6 +63,13 @@ FROST_MARK="# $WIDGET_ID"
 FROST_DEFAULT=80
 FROST_MIN=30
 
+# Hyprland toggles Omarchy loads after the user's own config, in sorted order.
+# Frosted glass is a file of this widget's there, named to sort after
+# Omarchy's window-glassy.lua so its blur settings win over Glassy's. Round
+# corners are Omarchy's own toggle, set through `omarchy hyprland corners`.
+TOGGLES_DIR="$STATE_DIR/toggles/hypr"
+GLASS_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-glass.lua"
+
 # Apps that hold a pty without being a terminal emulator.
 NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
 
@@ -920,7 +927,8 @@ emit_state() {
   [[ -n $shown ]] || shown=$(config_opacity foot)
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
-    --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" '
+    --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
+    --arg glass "$(glass_on && printf 1)" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -935,6 +943,8 @@ emit_state() {
       frostFollow: ($frost == "follow"),
       frostOpacity: (if $frostPercent == "" then null else ($frostPercent | tonumber) end),
       blurAvailable: ($blurAvailable == "true"),
+      glass: ($glass == "1"),
+      corners: $corners,
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
         opacity: (.[4] | tonumber), override: (.[5] == "true"),
@@ -1247,6 +1257,119 @@ blur_available() {
   [[ $(timeout 2 hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r '.bool == true' 2>/dev/null) == true ]]
 }
 
+# --- Frosted glass and round corners -----------------------------------------
+
+glass_on() {
+  [[ -f $GLASS_FILE ]]
+}
+
+# Omarchy's corner choice: rounded, sharp, or theme when neither is forced.
+corners_now() {
+  if [[ -f $TOGGLES_DIR/corners-rounded.lua ]]; then
+    printf rounded
+  elif [[ -f $TOGGLES_DIR/corners-sharp.lua ]]; then
+    printf sharp
+  else
+    printf theme
+  fi
+}
+
+# Reloads Hyprland and reports whether it took the config without errors.
+hypr_reload_ok() {
+  timeout 5 hyprctl reload >/dev/null 2>&1 || return 1
+  local errors
+  errors=$(timeout 2 hyprctl configerrors 2>/dev/null)
+  [[ -z ${errors//[[:space:]]/} ]]
+}
+
+# A heavier, lighter blur than Glassy's: what is behind a see-through window,
+# the bar or a menu reads as frosted glass rather than a smudge. It changes
+# only how Hyprland blurs, so it means nothing while Hyprland's blur is off.
+write_glass() {
+  mkdir -p "$TOGGLES_DIR" || return 1
+  local tmp
+  tmp=$(mktemp "$TOGGLES_DIR/.glass.XXXXXX") || return 1
+  cat >"$tmp" <<'EOF'
+-- Written by the Terminal opacity bar widget (bhj.terminal-opacity): its
+-- Frosted glass switch. Turning the switch off deletes this file. Named to
+-- load after window-glassy.lua, so these settings win over Glassy's.
+hl.config({
+  decoration = {
+    blur = {
+      size = 10,
+      passes = 3,
+      brightness = 1.15,
+      contrast = 0.9,
+      vibrancy = 0.5,
+      vibrancy_darkness = 0.2,
+      noise = 0.04,
+    },
+  },
+})
+EOF
+  mv -f "$tmp" "$GLASS_FILE"
+}
+
+cmd_glass() {
+  local want
+  case "${1:-}" in
+    on | true | 1) want=1 ;;
+    off | false | 0) want=0 ;;
+    toggle) glass_on && want=0 || want=1 ;;
+    *)
+      ERROR="Frosted glass is on, off or toggle."
+      return 1
+      ;;
+  esac
+  if (( want )); then
+    if ! write_glass; then
+      ERROR="Couldn't write $GLASS_FILE."
+      return 1
+    fi
+  else
+    rm -f "$GLASS_FILE"
+  fi
+  if ! hypr_reload_ok; then
+    if (( want )); then
+      rm -f "$GLASS_FILE"
+      hypr_reload_ok
+      ERROR="Hyprland didn't take the frosted glass settings, so they're off again. Check: hyprctl configerrors"
+    else
+      ERROR="Hyprland reported config errors on reload. Check: hyprctl configerrors"
+    fi
+    return 1
+  fi
+  if (( want )) && ! blur_available; then
+    NOTE="Frosted glass is set, but Hyprland's blur is off. \"Turn on Hyprland's blur\" fixes that."
+  fi
+  return 0
+}
+
+# On forces Omarchy's rounded corners on every window; off hands them back to
+# the theme, which is Omarchy's own default.
+cmd_corners() {
+  local want
+  case "${1:-}" in
+    on | true | 1 | rounded) want=rounded ;;
+    off | false | 0 | theme) want=theme ;;
+    sharp) want=sharp ;;
+    toggle) [[ $(corners_now) == rounded ]] && want=theme || want=rounded ;;
+    *)
+      ERROR="Round corners are on, off, toggle, rounded, sharp or theme."
+      return 1
+      ;;
+  esac
+  if ! command -v omarchy >/dev/null 2>&1; then
+    ERROR="Round corners need the omarchy command."
+    return 1
+  fi
+  if ! omarchy hyprland corners "$want" >/dev/null 2>&1; then
+    ERROR="Omarchy couldn't change the corners. Try: omarchy hyprland corners $want"
+    return 1
+  fi
+  return 0
+}
+
 # Choose whether backgrounds that programs paint fade along with the
 # terminal's own. One choice for every terminal, since Foot only reads it at
 # launch and so cannot be told window by window.
@@ -1526,8 +1649,13 @@ cmd_uninstall() {
   flush_props
   unwire
   write_frost ""
+  if glass_on; then
+    rm -f "$GLASS_FILE"
+    hypr_reload_ok
+  fi
   rm -f "$HOOK" "$STATE"
-  echo "Terminal opacity's hook, state, config includes and dropdown frost are removed."
+  echo "Terminal opacity's hook, state, config includes, dropdown frost and frosted glass are removed."
+  echo "Window corners are Omarchy's own setting and stay as they are: omarchy hyprland corners theme"
   echo "Take the widget out of the bar in ~/.config/omarchy/shell.json, then delete $PLUGIN_DIR."
 }
 
@@ -1551,6 +1679,8 @@ cmd_serve() {
         cells) cmd_cells "${a:-}"; emit_state ;;
         glassy) cmd_glassy; emit_state ;;
         frost) cmd_frost "${a:-}"; cmd_sync; emit_state ;;
+        glass) cmd_glass "${a:-}"; emit_state ;;
+        corners) cmd_corners "${a:-}"; emit_state ;;
         quit) break ;;
       esac
     elif (( $? > 128 )); then
@@ -1575,6 +1705,8 @@ Usage: terminal-opacity <command>
   glassy                           Turn on Hyprland's blur (Omarchy's Glassy look)
   frost <on|off|toggle|follow|30-100>
                                    Frost the bar's dropdowns; follow matches the terminals
+  glass <on|off|toggle>            Frosted glass: a heavier, lighter Hyprland blur
+  corners <on|off|toggle|sharp>    Round window corners (off follows the theme)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme
@@ -1630,6 +1762,14 @@ case "$command" in
   frost)
     (( $# == 1 )) || usage
     cmd_frost "$1"
+    status=$?
+    cmd_sync
+    emit_state
+    exit $status
+    ;;
+  glass | corners)
+    (( $# == 1 )) || usage
+    "cmd_$command" "$1"
     status=$?
     cmd_sync
     emit_state
