@@ -35,6 +35,14 @@ Panel {
       return Math.max(30, Math.round(opacitySlider.liveValue))
     return frostOpacity
   }
+  // Where the dropdown slider's knob sits: as frostShown, except for its own
+  // drag, which it tracks itself. Following frostShown through its own drag
+  // would hand the old value back the moment the slider lets go.
+  readonly property int frostSliderValue: {
+    if (frostFollow && selectedAddress === allAddress && opacitySlider.dragging)
+      return Math.max(30, Math.round(opacitySlider.liveValue))
+    return frostOpacity
+  }
   readonly property bool mixedBlur: {
     for (var i = 0; i < windows.length; i++) if (windows[i].blur !== defaultBlur) return true
     return false
@@ -649,7 +657,7 @@ Panel {
                 maximum: 100
                 step: 5
                 integer: true
-                value: root.frostShown
+                value: root.frostSliderValue
                 onMoved: function(v) { if (root.service) root.service.previewFrost(v) }
                 onReleased: function(v) { if (root.service) root.service.commitFrost(v) }
               }
@@ -764,7 +772,10 @@ Panel {
                 maximum: 200
                 step: 5
                 integer: true
-                value: root.glassShown
+                // The saved value only: tying it to the drag would hand the
+                // old value back the moment the slider lets go, before it
+                // reports where it was let go.
+                value: root.glassBrightness
                 onMoved: function(v) { if (root.service) root.service.previewGlass(v) }
                 onReleased: function(v) { if (root.service) root.service.commitGlass(v) }
               }
