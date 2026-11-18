@@ -52,8 +52,11 @@ itself is 38% solid with blur behind it, like the terminals.
   window, whatever the theme. Off hands the corners back to the theme. While
   it is on, a **Corner radius** slider sits under it (see
   [Round corners](#round-corners)).
-- **Follow the theme again** forgets the opacity saved here. It leaves the
-  blur choice alone.
+- **Reset to Omarchy's defaults** undoes everything here: opacity goes back to
+  the theme's, every switch goes off, every slider is forgotten, corners go
+  back to the theme's, and Glassy windows go back to Omarchy's plain
+  transparent ones. It asks for a second click first. It shows whenever
+  anything differs from those defaults.
 
 **All terminals** saves a default. New terminals open with it, and it survives
 theme changes. One window's value is its own until that window closes.
@@ -72,8 +75,8 @@ dropdowns. While a window is picked their headers say **Every window**.
 **Fade painted backgrounds too** is still one choice for every terminal: Foot
 reads it only when a window opens, and Kitty and Ghostty only per process.
 
-Hyprland can't clear a window's own corner radius once set. **Follow the
-theme again** keeps such a window on the global corners instead, and the
+Hyprland can't clear a window's own corner radius once set. **Reset to
+Omarchy's defaults** keeps such a window on the global corners instead, and the
 widget tells it each time those change, until it closes.
 
 ## Blur
@@ -298,7 +301,8 @@ terminal-opacity radius 12
 terminal-opacity colors grok
 terminal-opacity nudge focused -5
 terminal-opacity reapply
-terminal-opacity reset
+terminal-opacity reset        # opacities only
+terminal-opacity reset all    # everything, as the panel's reset
 ```
 
 State is in `~/.local/state/omarchy/terminal-opacity-v2.json`.

@@ -35,6 +35,8 @@ Item {
   // Whether Hyprland's blur is the heavier, lighter frosted glass, and
   // Omarchy's window corners: "rounded", "sharp", or "theme".
   property bool glass: false
+  // Anything differs from Omarchy's defaults, so there is something to reset.
+  property bool customized: false
   // Frosted glass brightness, a percent of Hyprland's: 100 leaves it as is.
   property int glassBrightness: 115
   // Blur strength, 0 to 100: Hyprland's blur size and passes together, in
@@ -87,7 +89,8 @@ Item {
     send("nudge " + target + " " + Math.round(delta))
   }
 
-  function reset() { send("reset") }
+  // Everything back to Omarchy's defaults, not just the opacity.
+  function reset() { send("reset all") }
 
   function setCells(on) {
     cells = on
@@ -207,6 +210,7 @@ Item {
     if (typeof data.frostOpacity === "number") frostOpacity = data.frostOpacity
     blurAvailable = data.blurAvailable === true
     glass = data.glass === true
+    customized = data.customized === true
     if (typeof data.glassBrightness === "number") glassBrightness = data.glassBrightness
     if (typeof data.blurStrength === "number") blurStrength = data.blurStrength
     if (typeof data.cornerRadius === "number") cornerRadius = data.cornerRadius

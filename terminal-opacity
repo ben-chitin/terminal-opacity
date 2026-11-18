@@ -986,7 +986,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg customized "$(customized && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -1002,6 +1002,7 @@ emit_state() {
       frostOpacity: (if $frostPercent == "" then null else ($frostPercent | tonumber) end),
       blurAvailable: ($blurAvailable == "true"),
       glass: ($glass == "1"),
+      customized: ($customized == "1"),
       glassBrightness: ($glassBrightness | tonumber),
       blurStrength: ($blurStrength | tonumber),
       cornerRadius: ($cornerRadius | tonumber),
@@ -2057,6 +2058,51 @@ cmd_reset() {
   apply_window_corners
 }
 
+# Whether anything here differs from Omarchy's own defaults: a saved opacity,
+# a window's own settings, any switch on, a saved slider, or Glassy windows
+# (which the panel's "Turn on Hyprland's blur" switches on). Needs the state
+# loaded.
+customized() {
+  [[ -n $DEFAULT || -n $FROST || -n $BLUR_STRENGTH || -n $CORNER_RADIUS || -n $GLASS_BRIGHTNESS ]] && return 0
+  (( BLUR || CELLS || ${#OV[@]} || ${#BOV[@]} )) && return 0
+  local addr
+  for addr in "${!ROV[@]}"; do
+    [[ ${ROV[$addr]} != follow ]] && return 0
+  done
+  glass_on && return 0
+  [[ -f $STRENGTH_FILE || -f $CORNERS_FILE || -f $TOGGLES_DIR/window-glassy.lua ]] && return 0
+  [[ $(corners_now) != theme ]]
+}
+
+# Everything back to Omarchy's own defaults: opacity from the theme, no blur,
+# painted backgrounds solid, no frosted glass, solid dropdowns, the theme's
+# corners, every slider forgotten, and Omarchy's plain transparent windows
+# instead of Glassy.
+cmd_reset_all() {
+  cmd_reset
+  cmd_blur all off
+  cmd_cells off
+  cmd_frost off
+  lock_state
+  load_state
+  BLUR_STRENGTH=""
+  CORNER_RADIUS=""
+  GLASS_BRIGHTNESS=""
+  FROST_LAST=""
+  save_state
+  unlock_state
+  rm -f "$STRENGTH_FILE" "$CORNERS_FILE"
+  glass_on && cmd_glass off
+  [[ $(corners_now) == theme ]] || cmd_corners off
+  if [[ -f $TOGGLES_DIR/window-glassy.lua ]] && command -v omarchy >/dev/null 2>&1; then
+    omarchy hyprland window transparency transparent >/dev/null 2>&1 ||
+      ERROR="Couldn't turn Glassy windows off. Try: omarchy hyprland window transparency transparent"
+  fi
+  hypr_reload_ok
+  cmd_sync
+  [[ -n $ERROR ]] || NOTE="Back to Omarchy's defaults."
+}
+
 cmd_install() {
   mkdir -p "${HOOK%/*}"
   printf '%s\n' '#!/bin/bash' \
@@ -2121,7 +2167,10 @@ cmd_serve() {
         nudge) cmd_nudge "${a:-focused}" "${b:-0}"; emit_state ;;
         sync) cmd_sync; emit_state ;;
         reapply) cmd_reapply; emit_state ;;
-        reset) cmd_reset; cmd_sync; emit_state ;;
+        reset)
+          if [[ ${a:-} == all ]]; then cmd_reset_all; else cmd_reset; cmd_sync; fi
+          emit_state
+          ;;
         blur) cmd_blur "${a:-}" "${b:-}"; emit_state ;;
         cells) cmd_cells "${a:-}"; emit_state ;;
         glassy) cmd_glassy; emit_state ;;
@@ -2174,7 +2223,8 @@ Usage: terminal-opacity <command>
   radius [focused|address] <1-20>  Their radius in px (Omarchy's is 6), or one window's
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
-  reset                            Forget saved values and follow the theme
+  reset                            Forget saved opacities and follow the theme
+  reset all                        Everything back to Omarchy's defaults
   install                          Add the bar widget and the theme-change hook
   uninstall                        Remove the hook, state and config includes
 EOF
@@ -2203,7 +2253,10 @@ case "$command" in
     exit $status
     ;;
   reapply) cmd_reapply; emit_state ;;
-  reset) cmd_reset; cmd_sync; emit_state ;;
+  reset)
+    if [[ ${1:-} == all ]]; then cmd_reset_all; else cmd_reset; cmd_sync; fi
+    emit_state
+    ;;
   blur)
     (( $# == 2 )) || usage
     cmd_blur "$1" "$2"

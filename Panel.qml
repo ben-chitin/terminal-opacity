@@ -82,6 +82,9 @@ Panel {
 
   readonly property string allAddress: "*"
   readonly property string resetAddress: "!reset"
+  readonly property bool customized: service ? service.customized : false
+  // Resetting undoes every setting here, so it takes a second click.
+  property bool confirmingReset: false
 
   property string selectedAddress: allAddress
   property int shownPercent: 100
@@ -134,11 +137,13 @@ Panel {
         opacity: w.opacity, solidText: w.solidText
       })
     }
-    if (defaultSet || anyOverride) {
+    if (customized || defaultSet || anyOverride) {
       list.push({
         address: resetAddress,
-        title: "Follow the theme again",
-        detail: "Forget the opacity saved here",
+        title: confirmingReset ? "Reset everything?" : "Reset to Omarchy's defaults",
+        detail: confirmingReset
+          ? "Click or press Enter again to undo everything"
+          : "Opacity, blur, glass, dropdowns and corners",
         opacity: -1,
         solidText: true
       })
@@ -233,6 +238,13 @@ Panel {
   }
 
   function reset() {
+    if (!confirmingReset) {
+      confirmingReset = true
+      resetConfirmTimer.restart()
+      return
+    }
+    confirmingReset = false
+    resetConfirmTimer.stop()
     selectedAddress = allAddress
     if (service) service.reset()
   }
@@ -404,7 +416,14 @@ Panel {
   onCornersOnChanged: if (!cornersOn && focusSection === "cornerRadius") focusSection = "corners"
   onDefaultOpacityChanged: follow()
 
+  Timer {
+    id: resetConfirmTimer
+    interval: 5000
+    onTriggered: root.confirmingReset = false
+  }
+
   onOpenedChanged: {
+    confirmingReset = false
     if (service) service.viewers += opened ? 1 : -1
     if (!opened) return
     selectedAddress = allAddress
