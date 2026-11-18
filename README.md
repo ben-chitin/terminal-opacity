@@ -120,8 +120,15 @@ Hyprland reloads; if it reports a config error the file is taken out again.
 
 ```sh
 terminal-opacity glass on
+terminal-opacity glass 130     # brightness, 50 to 200; 100 leaves it as is
 terminal-opacity glass off
 ```
+
+While it is on, a **Frost brightness** slider sits under the switch, from 50%
+(dimmer than what is behind) through 100% (as is) to 200% (brighter); 115% at
+first. Dragging changes Hyprland's blur live with `hyprctl eval`, with no
+reload; letting go saves it into the file. It goes away when the switch is
+off, and the value is kept for the next time it is on.
 
 ## Round corners
 

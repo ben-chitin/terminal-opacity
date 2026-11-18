@@ -35,6 +35,9 @@ Item {
   // Whether Hyprland's blur is the heavier, lighter frosted glass, and
   // Omarchy's window corners: "rounded", "sharp", or "theme".
   property bool glass: false
+  // Frosted glass brightness, a percent of Hyprland's: 100 leaves it as is.
+  property int glassBrightness: 115
+  property int glassPreviewValue: -1
   property string corners: "theme"
   property string note: ""
   property string error: ""
@@ -128,6 +131,20 @@ Item {
     send("corners " + (on ? "on" : "off"))
   }
 
+  // A drag step is set live in Hyprland without a reload; steps faster than
+  // that collapse into the latest. Release saves it.
+  function previewGlass(value) {
+    glassPreviewValue = Math.max(50, Math.min(200, Math.round(value)))
+    if (!glassTimer.running) glassTimer.start()
+  }
+
+  function commitGlass(value) {
+    glassTimer.stop()
+    glassPreviewValue = -1
+    glassBrightness = Math.max(50, Math.min(200, Math.round(value)))
+    send("glass " + glassBrightness)
+  }
+
   // Shown at once; the backend's answer confirms it.
   function setBlur(target, on) {
     if (target === "all") blur = on
@@ -152,6 +169,7 @@ Item {
     if (typeof data.frostOpacity === "number") frostOpacity = data.frostOpacity
     blurAvailable = data.blurAvailable === true
     glass = data.glass === true
+    if (typeof data.glassBrightness === "number") glassBrightness = data.glassBrightness
     if (typeof data.corners === "string") corners = data.corners
     switchingGlassy = false
     note = String(data.note || "")
@@ -191,6 +209,16 @@ Item {
       if (root.frostPreviewValue < 0) return
       root.send("frost " + root.frostPreviewValue)
       root.frostPreviewValue = -1
+    }
+  }
+
+  Timer {
+    id: glassTimer
+    interval: 40
+    onTriggered: {
+      if (root.glassPreviewValue < 0) return
+      root.send("glasspreview " + root.glassPreviewValue)
+      root.glassPreviewValue = -1
     }
   }
 

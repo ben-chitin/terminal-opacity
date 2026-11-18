@@ -69,6 +69,11 @@ FROST_MIN=30
 # corners are Omarchy's own toggle, set through `omarchy hyprland corners`.
 TOGGLES_DIR="$STATE_DIR/toggles/hypr"
 GLASS_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-glass.lua"
+# How bright frosted glass makes what shows through it, as a percent of
+# Hyprland's blur brightness: 100 leaves it as it is, Glassy's own is 75.
+GLASS_BRIGHTNESS_DEFAULT=115
+GLASS_BRIGHTNESS_MIN=50
+GLASS_BRIGHTNESS_MAX=200
 
 # Apps that hold a pty without being a terminal emulator.
 NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
@@ -85,6 +90,7 @@ CELLS=0             # 1 when backgrounds that programs paint fade too
 FROST=""            # bar dropdowns while frosted: a percent, or "follow" to match the
                     # terminals' default; empty when the theme decides
 FROST_LAST=""       # what it was before it was last turned off
+GLASS_BRIGHTNESS="" # frosted glass brightness percent; empty for the default
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
@@ -106,6 +112,7 @@ load_state() {
   CELLS=0
   FROST=""
   FROST_LAST=""
+  GLASS_BRIGHTNESS=""
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
@@ -124,6 +131,9 @@ load_state() {
         fi
         ;;
       frostLast) [[ $a == follow || ( $a =~ ^[0-9]+$ && $a -ge $FROST_MIN && $a -le 100 ) ]] && FROST_LAST=$a ;;
+      glassBrightness)
+        [[ $a =~ ^[0-9]+$ ]] && (( a >= GLASS_BRIGHTNESS_MIN && a <= GLASS_BRIGHTNESS_MAX )) && GLASS_BRIGHTNESS=$a
+        ;;
       cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
@@ -145,6 +155,7 @@ load_state() {
      elif .frost == "follow" then "frost\tfollow" else empty end),
     (if (.frostLast | type) == "number" then "frostLast\t\(.frostLast | floor)"
      elif .frostLast == "follow" then "frostLast\tfollow" else empty end),
+    (if (.glassBrightness | type) == "number" then "glassBrightness\t\(.glassBrightness | floor)" else empty end),
     ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
@@ -177,9 +188,9 @@ save_state() {
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
   local changes=${CELLS_CHANGES// /,}
-  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
+  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"glassBrightness":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "$changes" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "${GLASS_BRIGHTNESS:-null}" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -928,7 +939,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -944,6 +955,7 @@ emit_state() {
       frostOpacity: (if $frostPercent == "" then null else ($frostPercent | tonumber) end),
       blurAvailable: ($blurAvailable == "true"),
       glass: ($glass == "1"),
+      glassBrightness: ($glassBrightness | tonumber),
       corners: $corners,
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
@@ -1282,14 +1294,25 @@ hypr_reload_ok() {
   [[ -z ${errors//[[:space:]]/} ]]
 }
 
+# The frosted glass brightness now, as a percent.
+glass_brightness() {
+  printf '%s' "${GLASS_BRIGHTNESS:-$GLASS_BRIGHTNESS_DEFAULT}"
+}
+
+# A percent as Hyprland's brightness: 115 is 1.15.
+brightness_of() {
+  printf '%d.%02d' $(($1 / 100)) $(($1 % 100))
+}
+
 # A heavier, lighter blur than Glassy's: what is behind a see-through window,
 # the bar or a menu reads as frosted glass rather than a smudge. It changes
 # only how Hyprland blurs, so it means nothing while Hyprland's blur is off.
 write_glass() {
   mkdir -p "$TOGGLES_DIR" || return 1
-  local tmp
+  local tmp brightness
+  brightness=$(brightness_of "$(glass_brightness)")
   tmp=$(mktemp "$TOGGLES_DIR/.glass.XXXXXX") || return 1
-  cat >"$tmp" <<'EOF'
+  cat >"$tmp" <<EOF
 -- Written by the Terminal opacity bar widget (bhj.terminal-opacity): its
 -- Frosted glass switch. Turning the switch off deletes this file. Named to
 -- load after window-glassy.lua, so these settings win over Glassy's.
@@ -1298,7 +1321,7 @@ hl.config({
     blur = {
       size = 10,
       passes = 3,
-      brightness = 1.15,
+      brightness = $brightness,
       contrast = 0.9,
       vibrancy = 0.5,
       vibrancy_darkness = 0.2,
@@ -1310,6 +1333,43 @@ EOF
   mv -f "$tmp" "$GLASS_FILE"
 }
 
+# Sets Hyprland's blur brightness live, without a reload. A percent is
+# validated before it gets here, so the Lua is built from digits only.
+set_live_brightness() {
+  timeout 2 hyprctl eval "hl.config({ decoration = { blur = { brightness = $(brightness_of "$1") } } })" >/dev/null 2>&1
+}
+
+# A step of a brightness drag: shown, not saved.
+cmd_glass_preview() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] || return 1
+  glass_on || return 0
+  set_live_brightness "$(clamp "$1" "$GLASS_BRIGHTNESS_MIN" "$GLASS_BRIGHTNESS_MAX")"
+}
+
+# A new brightness: saved, written into the file so it outlasts a reload, and
+# set live. While frosted glass is off it is only saved, for when it is on.
+glass_set_brightness() {
+  local percent=$1
+  lock_state
+  load_state
+  GLASS_BRIGHTNESS=$percent
+  save_state
+  unlock_state
+  glass_on || {
+    NOTE="Saved. Frosted glass is off, so it applies when that is turned on."
+    return 0
+  }
+  if ! write_glass; then
+    ERROR="Couldn't write $GLASS_FILE."
+    return 1
+  fi
+  if ! set_live_brightness "$percent"; then
+    ERROR="Saved, but Hyprland didn't take it live. Check: hyprctl configerrors"
+    return 1
+  fi
+  return 0
+}
+
 cmd_glass() {
   local want
   case "${1:-}" in
@@ -1317,10 +1377,17 @@ cmd_glass() {
     off | false | 0) want=0 ;;
     toggle) glass_on && want=0 || want=1 ;;
     *)
-      ERROR="Frosted glass is on, off or toggle."
+      if [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 >= GLASS_BRIGHTNESS_MIN && $1 <= GLASS_BRIGHTNESS_MAX )); then
+        glass_set_brightness "$1"
+        return
+      fi
+      ERROR="Frosted glass is on, off, toggle, or a brightness from $GLASS_BRIGHTNESS_MIN to $GLASS_BRIGHTNESS_MAX."
       return 1
       ;;
   esac
+  lock_state
+  load_state
+  unlock_state
   if (( want )); then
     if ! write_glass; then
       ERROR="Couldn't write $GLASS_FILE."
@@ -1680,6 +1747,7 @@ cmd_serve() {
         glassy) cmd_glassy; emit_state ;;
         frost) cmd_frost "${a:-}"; cmd_sync; emit_state ;;
         glass) cmd_glass "${a:-}"; emit_state ;;
+        glasspreview) cmd_glass_preview "${a:-}" ;;
         corners) cmd_corners "${a:-}"; emit_state ;;
         quit) break ;;
       esac
@@ -1705,7 +1773,8 @@ Usage: terminal-opacity <command>
   glassy                           Turn on Hyprland's blur (Omarchy's Glassy look)
   frost <on|off|toggle|follow|30-100>
                                    Frost the bar's dropdowns; follow matches the terminals
-  glass <on|off|toggle>            Frosted glass: a heavier, lighter Hyprland blur
+  glass <on|off|toggle|50-200>     Frosted glass: a heavier, lighter Hyprland blur;
+                                   a number sets its brightness (100 leaves it as is)
   corners <on|off|toggle|sharp>    Round window corners (off follows the theme)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value

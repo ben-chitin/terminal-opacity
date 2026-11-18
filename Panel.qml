@@ -24,6 +24,8 @@ Panel {
   readonly property int frostOpacity: service ? service.frostOpacity : 80
   readonly property bool frostFollow: service ? service.frostFollow : false
   readonly property bool glass: service ? service.glass : false
+  readonly property int glassBrightness: service ? service.glassBrightness : 115
+  readonly property int glassShown: glassSlider.dragging ? Math.round(glassSlider.liveValue) : glassBrightness
   readonly property string corners: service ? service.corners : "theme"
   readonly property bool rounded: corners === "rounded"
   // What the dropdowns show now, live while either slider is dragged.
@@ -177,6 +179,10 @@ Panel {
   }
 
   function adjust(delta) {
+    if (focusSection === "glassSlider") {
+      if (service) service.commitGlass(glassBrightness + delta)
+      return
+    }
     if (focusSection === "frostSlider") {
       if (service) service.commitFrost(frostOpacity + delta)
       return
@@ -222,7 +228,9 @@ Panel {
   readonly property var sections: {
     var list = ["slider", "blur", "cells", "frost"]
     if (frost) list.push("frostSlider", "frostMode")
-    list.push("glass", "corners")
+    list.push("glass")
+    if (glass) list.push("glassSlider")
+    list.push("corners")
     if (needsGlassy) list.push("glassy")
     return list
   }
@@ -291,7 +299,7 @@ Panel {
       toggleCorners()
       return
     }
-    if (focusSection === "frostSlider") return
+    if (focusSection === "frostSlider" || focusSection === "glassSlider") return
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -316,6 +324,7 @@ Panel {
   onWindowsChanged: follow()
   onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "corners"
   onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
+  onGlassChanged: if (!glass && focusSection === "glassSlider") focusSection = "glass"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -699,6 +708,85 @@ Panel {
               root.selectedIndex = -1
             }
             onClicked: root.toggleGlass()
+          }
+
+          // How bright what shows through frosted glass is. Only there while
+          // frosted glass is on. 100% leaves Hyprland's blur as bright as
+          // what is behind it.
+          Column {
+            visible: root.glass
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(glassHeader.implicitHeight, glassPercent.implicitHeight)
+
+              PanelSectionHeader {
+                id: glassHeader
+                text: "FROST BRIGHTNESS"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: glassPercent
+                textFormat: Text.PlainText
+                text: root.glassShown + "%"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            CursorSurface {
+              id: glassSliderSurface
+              width: parent.width
+              height: glassSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "glassSlider"
+              foreground: root.bar.foreground
+              outline: true
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassSliderSurface)
+
+              PanelSlider {
+                id: glassSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: 50
+                maximum: 200
+                step: 5
+                integer: true
+                value: root.glassShown
+                onMoved: function(v) { if (root.service) root.service.previewGlass(v) }
+                onReleased: function(v) { if (root.service) root.service.commitGlass(v) }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "glassSlider"
+                  root.selectedIndex = -1
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "50% dimmer  ·  100% as is  ·  200% brighter"
+              color: Qt.darker(root.bar.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
           }
 
           // Omarchy's own corner setting, for every window.
