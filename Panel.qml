@@ -149,7 +149,7 @@ Panel {
     list.push({
       address: saveAddress,
       title: "Save this look for " + themeLabel,
-      detail: lookSaved ? "Replaces the one saved. Loads whenever " + themeLabel + " is set"
+      detail: lookSaved ? "Replaces the saved one. Loads with " + themeLabel
                         : "Loads whenever " + themeLabel + " is set",
       opacity: -1,
       solidText: true
@@ -536,6 +536,11 @@ Panel {
         id: scrollArea
         anchors.fill: parent
         clip: true
+        // Said outright: worked out from the column alone, the scrollable
+        // height could stop short of the last rows once the panel outgrew
+        // the screen.
+        contentWidth: availableWidth
+        contentHeight: panelColumn.implicitHeight
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         ScrollBar.vertical.policy: panelColumn.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
         Binding {

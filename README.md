@@ -24,6 +24,25 @@ The panel: the slider, the switches, and what the slider applies to. Here
 **Frost bar dropdowns** is on and set to **Match terminals**, so the panel
 itself is 38% solid with blur behind it, like the terminals.
 
+![Grok and OpenCode at 40% behind Frosted glass, with the panel showing Blur strength at 45% and Frost brightness at 130%](assets/frosted-glass.png)
+
+**Frosted glass** with **Blur strength** at 45% and **Frost brightness** at
+130%: a heavier, brighter blur than Omarchy's own. Blur strength sits under
+**Blur what shows through** and brightness under **Frosted glass**; each
+shows only while its switch is on.
+
+![OpenCode picked in the panel with its own 20 px corners, beside Grok's square ones](assets/window-corners.png)
+
+One window picked: OpenCode gets its own 20 px corners while Grok keeps the
+theme's square ones. Settings Hyprland has only one of, such as the dropdown
+opacity, say **Every window** while a window is picked.
+
+![The bottom of the panel: Save this look for Last Horizon, Forget Last Horizon's saved look, and Reset to Omarchy's defaults](assets/saved-look.png)
+
+A look saved for Last Horizon loads whenever that theme is set. Under it,
+the saved look can be forgotten, and **Reset to Omarchy's defaults** puts
+everything back.
+
 ## Using it
 
 - Click the bar icon, pick **All terminals** or one window, and drag.
