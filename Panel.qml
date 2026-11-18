@@ -350,6 +350,22 @@ Panel {
     else if (bottom > flick.contentY + flick.height - margin) flick.contentY = bottom + margin - flick.height
   }
 
+  // Scrolling over a slider would set it, since Omarchy's slider takes the
+  // wheel. A two-finger scroll down the panel that passes over one stops on
+  // it, so the wheel scrolls the panel instead whenever the panel scrolls at
+  // all; when everything fits, it goes on to the slider as before.
+  function scrollPanel(wheel) {
+    var flick = scrollArea ? scrollArea.contentItem : null
+    if (!flick || flick.contentY === undefined || panelColumn.implicitHeight <= scrollArea.height) {
+      wheel.accepted = false
+      return
+    }
+    var dy = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y : wheel.angleDelta.y / 120 * Style.space(48)
+    var limit = Math.max(0, flick.contentHeight - flick.height)
+    flick.contentY = Math.max(0, Math.min(limit, flick.contentY - dy))
+    wheel.accepted = true
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -533,6 +549,15 @@ Panel {
                 onReleased: function(v) { root.commit(v) }
               }
 
+              // Takes only the wheel, so presses, drags and hover still reach
+              // the slider beneath.
+              MouseArea {
+                anchors.fill: parent
+                z: 10
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.scrollPanel(wheel) }
+              }
+
               HoverHandler {
                 onHoveredChanged: if (hovered) {
                   root.cursorActive = true
@@ -640,6 +665,15 @@ Panel {
                 onReleased: function(v) { if (root.service) root.service.commitGlass("strength", v) }
               }
 
+              // Takes only the wheel, so presses, drags and hover still reach
+              // the slider beneath.
+              MouseArea {
+                anchors.fill: parent
+                z: 10
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.scrollPanel(wheel) }
+              }
+
               HoverHandler {
                 onHoveredChanged: if (hovered) {
                   root.cursorActive = true
@@ -744,6 +778,15 @@ Panel {
                 value: root.glassBrightness
                 onMoved: function(v) { if (root.service) root.service.previewGlass("brightness", v) }
                 onReleased: function(v) { if (root.service) root.service.commitGlass("brightness", v) }
+              }
+
+              // Takes only the wheel, so presses, drags and hover still reach
+              // the slider beneath.
+              MouseArea {
+                anchors.fill: parent
+                z: 10
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.scrollPanel(wheel) }
               }
 
               HoverHandler {
@@ -874,6 +917,15 @@ Panel {
                 onReleased: function(v) { if (root.service) root.service.commitFrost(v) }
               }
 
+              // Takes only the wheel, so presses, drags and hover still reach
+              // the slider beneath.
+              MouseArea {
+                anchors.fill: parent
+                z: 10
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.scrollPanel(wheel) }
+              }
+
               HoverHandler {
                 onHoveredChanged: if (hovered) {
                   root.cursorActive = true
@@ -987,6 +1039,15 @@ Panel {
                 value: root.cornerRadius
                 onMoved: function(v) { if (root.service) root.service.previewGlass("radius", v) }
                 onReleased: function(v) { if (root.service) root.service.commitGlass("radius", v) }
+              }
+
+              // Takes only the wheel, so presses, drags and hover still reach
+              // the slider beneath.
+              MouseArea {
+                anchors.fill: parent
+                z: 10
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.scrollPanel(wheel) }
               }
 
               HoverHandler {
