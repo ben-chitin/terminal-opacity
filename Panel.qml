@@ -37,7 +37,18 @@ Panel {
   readonly property string corners: service ? service.corners : "theme"
   readonly property bool rounded: corners === "rounded"
   readonly property int cornerRadius: service ? service.cornerRadius : 6
-  readonly property int radiusShown: radiusSlider.dragging ? Math.round(radiusSlider.liveValue) : cornerRadius
+  // A window's radius just let go of, until the backend's answer has it.
+  property int pendingWindowRadius: -1
+  // The corners of whatever the panel points at: one window's, or the
+  // global ones for every window.
+  readonly property bool cornersOn: selectedWindow ? selectedWindow.radius > 0 : rounded
+  readonly property int radiusValue: selectedWindow
+    ? (pendingWindowRadius >= 0 ? pendingWindowRadius : Math.max(1, selectedWindow.radius))
+    : cornerRadius
+  readonly property int radiusShown: radiusSlider.dragging ? Math.round(radiusSlider.liveValue) : radiusValue
+  // Settings Hyprland or the bar have one of for everything: while a window
+  // is picked, their headers say so.
+  readonly property string everyWindow: selectedWindow ? "  ·  EVERY WINDOW" : ""
   // What the dropdowns show now, live while either slider is dragged.
   readonly property int frostShown: {
     if (frostSlider.dragging) return Math.round(frostSlider.liveValue)
@@ -176,6 +187,7 @@ Panel {
   function selectAddress(address) {
     if (address === resetAddress || address === selectedAddress) return
     selectedAddress = address
+    pendingWindowRadius = -1
     if (!opacitySlider.dragging) shownPercent = opacityOf(address)
   }
 
@@ -202,7 +214,7 @@ Panel {
       return
     }
     if (focusSection === "cornerRadius") {
-      if (service) service.commitGlass("radius", cornerRadius + Math.sign(delta))
+      commitRadius(radiusValue + Math.sign(delta))
       return
     }
     if (focusSection === "blurStrength") {
@@ -242,7 +254,19 @@ Panel {
   }
 
   function toggleCorners() {
-    if (service) service.setRounded(!rounded)
+    if (!service) return
+    if (selectedWindow) service.setWindowCorners(selectedWindow.address, !cornersOn)
+    else service.setRounded(!rounded)
+  }
+
+  function previewRadius(v) {
+    if (service) service.previewGlass("radius", v, selectedWindow ? selectedWindow.address : "")
+  }
+
+  function commitRadius(v) {
+    if (!service) return
+    if (selectedWindow) pendingWindowRadius = Math.max(1, Math.min(20, Math.round(v)))
+    service.commitGlass("radius", v, selectedWindow ? selectedWindow.address : "")
   }
 
   function turnOnGlassy() {
@@ -262,7 +286,7 @@ Panel {
     list.push("cells", "frost")
     if (frost) list.push("frostSlider", "frostMode")
     list.push("corners")
-    if (rounded) list.push("cornerRadius")
+    if (cornersOn) list.push("cornerRadius")
     if (needsGlassy) list.push("glassy")
     return list
   }
@@ -369,12 +393,15 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onWindowsChanged: follow()
-  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = rounded ? "cornerRadius" : "corners"
+  onWindowsChanged: {
+    pendingWindowRadius = -1
+    follow()
+  }
+  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = cornersOn ? "cornerRadius" : "corners"
   onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
   onGlassChanged: if (!glass && focusSection === "glassSlider") focusSection = "glass"
   onAnyBlurChanged: if (!anyBlur && focusSection === "blurStrength") focusSection = "blur"
-  onRoundedChanged: if (!rounded && focusSection === "cornerRadius") focusSection = "corners"
+  onCornersOnChanged: if (!cornersOn && focusSection === "cornerRadius") focusSection = "corners"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -618,7 +645,7 @@ Panel {
 
               PanelSectionHeader {
                 id: strengthHeader
-                text: "BLUR STRENGTH"
+                text: "BLUR STRENGTH" + root.everyWindow
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 anchors.left: parent.left
@@ -699,11 +726,12 @@ Panel {
             id: glassToggle
             width: parent.width
             label: "Frosted glass"
-            description: root.glass && !root.blurAvailable
-              ? "Set, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
-              : root.glass
-                ? "A heavier, lighter blur behind terminals, the bar and menus"
-                : "Omarchy's own blur: softer, and it dims a little"
+            description: (root.selectedWindow ? "Every window, not just this one. " : "")
+              + (root.glass && !root.blurAvailable
+                ? "Set, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
+                : root.glass
+                  ? "A heavier, lighter blur behind terminals, the bar and menus"
+                  : "Omarchy's own blur: softer, and it dims a little")
             checked: root.glass
             hasCursor: root.cursorActive && root.focusSection === "glass"
             foreground: root.bar.foreground
@@ -732,7 +760,7 @@ Panel {
 
               PanelSectionHeader {
                 id: glassHeader
-                text: "FROST BRIGHTNESS"
+                text: "FROST BRIGHTNESS" + root.everyWindow
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 anchors.left: parent.left
@@ -872,7 +900,7 @@ Panel {
 
               PanelSectionHeader {
                 id: frostHeader
-                text: "DROPDOWN OPACITY"
+                text: "DROPDOWN OPACITY" + root.everyWindow
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 anchors.left: parent.left
@@ -963,12 +991,15 @@ Panel {
             id: cornersToggle
             width: parent.width
             label: "Round window corners"
-            description: root.rounded
-              ? "Every window, whatever the theme"
-              : root.corners === "sharp"
-                ? "Every window is forced square. On rounds them"
-                : "Every window: as the theme draws them"
-            checked: root.rounded
+            description: root.selectedWindow
+              ? (root.cornersOn ? "Just this window, until it closes"
+                                : "Just this window: square corners, until it closes")
+              : root.rounded
+                ? "Every window, whatever the theme"
+                : root.corners === "sharp"
+                  ? "Every window is forced square. On rounds them"
+                  : "Every window: as the theme draws them"
+            checked: root.cornersOn
             hasCursor: root.cursorActive && root.focusSection === "corners"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
@@ -982,9 +1013,10 @@ Panel {
             onClicked: root.toggleCorners()
           }
 
-          // The corners' radius. Only there while rounded corners are on.
+          // The corners' radius: one window's, or every window's. Only there
+          // while those corners are rounded.
           Column {
-            visible: root.rounded
+            visible: root.cornersOn
             width: parent.width
             spacing: Style.space(6)
 
@@ -1036,9 +1068,9 @@ Panel {
                 integer: true
                 // The saved value only: tying it to the drag would hand the
                 // old value back the moment the slider lets go.
-                value: root.cornerRadius
-                onMoved: function(v) { if (root.service) root.service.previewGlass("radius", v) }
-                onReleased: function(v) { if (root.service) root.service.commitGlass("radius", v) }
+                value: root.radiusValue
+                onMoved: function(v) { root.previewRadius(v) }
+                onReleased: function(v) { root.commitRadius(v) }
               }
 
               // Takes only the wheel, so presses, drags and hover still reach

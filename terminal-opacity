@@ -109,6 +109,9 @@ CORNER_RADIUS=""    # rounded corner radius in px; empty for Omarchy's 6
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
+declare -A ROV=()    # window address -> corner radius override in px (0 is
+                     # square), or "follow" to keep it on the global corners
+declare -A ROVPID=() # window address -> pid the radius override was saved for
 
 lock_state() {
   exec 9>>"$STATE_DIR/terminal-opacity.lock"
@@ -133,9 +136,11 @@ load_state() {
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
+  ROV=()
+  ROVPID=()
   [[ -f $STATE ]] || return 0
-  local kind a b c d
-  while IFS=$'\t' read -r kind a b c d; do
+  local kind a b c d e
+  while IFS=$'\t' read -r kind a b c d e; do
     case "$kind" in
       default) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && DEFAULT=$a ;;
       blur) BLUR=1 ;;
@@ -166,6 +171,10 @@ load_state() {
           on) BOV[$a]=1; BOVPID[$a]=$b ;;
           off) BOV[$a]=0; BOVPID[$a]=$b ;;
         esac
+        if [[ $e == follow ]] || { [[ $e =~ ^[0-9]+$ ]] && (( e <= CORNER_RADIUS_MAX )); }; then
+          ROV[$a]=$e
+          ROVPID[$a]=$b
+        fi
         ;;
     esac
   done < <(jq -r '
@@ -183,7 +192,9 @@ load_state() {
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
       | "window\t\(.key)\t\(.value.pid)\t\(.value.opacity // "-")\t\(
-          if .value.blur == true then "on" elif .value.blur == false then "off" else "-" end)")
+          if .value.blur == true then "on" elif .value.blur == false then "off" else "-" end)\t\(
+          if (.value.radius | type) == "number" then (.value.radius | floor | tostring)
+          elif .value.radius == "follow" then "follow" else "-" end)")
   ' "$STATE" 2>/dev/null)
 }
 
@@ -199,13 +210,18 @@ frost_json() {
 save_state() {
   local tmp addr entry sep="" body=""
   local -A saved=()
-  for addr in "${!OV[@]}" "${!BOV[@]}"; do saved[$addr]=1; done
+  for addr in "${!OV[@]}" "${!BOV[@]}" "${!ROV[@]}"; do saved[$addr]=1; done
   for addr in "${!saved[@]}"; do
-    entry="\"pid\":${OVPID[$addr]:-${BOVPID[$addr]:-0}}"
+    entry="\"pid\":${OVPID[$addr]:-${BOVPID[$addr]:-${ROVPID[$addr]:-0}}}"
     [[ -n ${OV[$addr]:-} ]] && entry+=",\"opacity\":${OV[$addr]}"
     if [[ -n ${BOV[$addr]:-} ]]; then
       [[ ${BOV[$addr]} == 1 ]] && entry+=',"blur":true' || entry+=',"blur":false'
     fi
+    case "${ROV[$addr]:-}" in
+      "") ;;
+      follow) entry+=',"radius":"follow"' ;;
+      *) entry+=",\"radius\":${ROV[$addr]}" ;;
+    esac
     body+="$sep\"$addr\":{$entry}"
     sep=","
   done
@@ -721,6 +737,12 @@ scan() {
       dropped=1
     fi
   done
+  for addr in "${!ROV[@]}"; do
+    if [[ ${W_PID[$addr]:-} != "${ROVPID[$addr]}" ]]; then
+      unset "ROV[$addr]" "ROVPID[$addr]"
+      dropped=1
+    fi
+  done
   for addr in "${!PINNED[@]}"; do
     [[ -n ${W_PID[$addr]:-} ]] || unset "PINNED[$addr]"
   done
@@ -951,11 +973,13 @@ ERROR=""
 
 emit_state() {
   local addr rows=""
+  GLOBAL_ROUNDING=$(global_rounding)
   for addr in "${W_ORDER[@]}"; do
     rows+="$addr$US${W_TITLE[$addr]}$US${W_NAME[$addr]}$US${W_EMU[$addr]}$US$(value_of "$addr")$US"
     rows+="$([[ -n ${OV[$addr]:-} ]] && printf true || printf false)$US${W_FOCUSED[$addr]}$US${W_FS[$addr]}$US"
     rows+="${W_SHARED[$addr]}$US${W_WS[$addr]}$US$(blur_of "$addr")$US"
-    rows+="$([[ -n ${BOV[$addr]:-} ]] && printf true || printf false)$US${W_STALE[$addr]:-false}"$'\n'
+    rows+="$([[ -n ${BOV[$addr]:-} ]] && printf true || printf false)$US${W_STALE[$addr]:-false}$US"
+    rows+="$(radius_of "$addr")$US$([[ ${ROV[$addr]:-follow} != follow ]] && printf true || printf false)"$'\n'
   done
   local shown=$DEFAULT
   [[ -n $shown ]] || shown=$(config_opacity foot)
@@ -989,6 +1013,7 @@ emit_state() {
         shared: (.[8] == "true"), workspace: .[9],
         blur: (.[10] == "1"), blurOverride: (.[11] == "true"),
         stale: (.[12] == "true"),
+        radius: (.[13] | tonumber? // 0), radiusOverride: (.[14] == "true"),
         solidText: (.[3] != "other")
       }]
     }' <<<"$rows"
@@ -1629,6 +1654,8 @@ cmd_radius() {
     ERROR="Saved, but Hyprland didn't take it live. Check: hyprctl configerrors"
     return 1
   fi
+  scan
+  apply_window_corners
   return 0
 }
 
@@ -1637,6 +1664,123 @@ cmd_radius_preview() {
   [[ ${1:-} =~ ^[0-9]+$ ]] || return 1
   [[ $(corners_now) == rounded ]] || return 0
   set_live_radius "$(clamp "$1" "$CORNER_RADIUS_MIN" "$CORNER_RADIUS_MAX")"
+}
+
+# --- One window's corners --------------------------------------------------
+#
+# Hyprland can round one window with its own radius, as a window property.
+# It cannot clear one once set, so a window handed back to the global corners
+# is kept on them ("follow") and told each time they change, until it closes.
+
+GLOBAL_ROUNDING=""
+
+global_rounding() {
+  local v
+  v=$(timeout 2 hyprctl getoption decoration:rounding -j 2>/dev/null | jq -r '.int // empty' 2>/dev/null)
+  [[ $v =~ ^[0-9]+$ ]] && printf '%s' "$v" || printf 0
+}
+
+# A window's radius now: its own, or the global one.
+radius_of() {
+  local v=${ROV[$1]:-follow}
+  if [[ $v == follow ]]; then
+    [[ -n $GLOBAL_ROUNDING ]] || GLOBAL_ROUNDING=$(global_rounding)
+    v=$GLOBAL_ROUNDING
+  fi
+  printf '%s' "$v"
+}
+
+queue_round() {
+  HYPR_BATCH+="${HYPR_BATCH:+ ; }dispatch hl.dsp.window.set_prop({ prop = \"rounding\", value = \"$2\", window = \"address:$1\" })"
+}
+
+# Tells every window with a radius of its own, or kept on the global one,
+# what that is now. After a reload or a change to the global corners.
+apply_window_corners() {
+  (( ${#ROV[@]} )) || return 0
+  GLOBAL_ROUNDING=$(global_rounding)
+  local addr
+  for addr in "${!ROV[@]}"; do
+    [[ -n ${W_PID[$addr]:-} ]] && queue_round "$addr" "$(radius_of "$addr")"
+  done
+  flush_props
+}
+
+# The window a target names: focused, or an address. Sets TARGET_ADDR.
+window_target() {
+  TARGET_ADDR=""
+  case "$1" in
+    focused) TARGET_ADDR=$FOCUSED_ADDR ;;
+    0x* | address:0x*) TARGET_ADDR=${1#address:} ;;
+  esac
+  if [[ ! $TARGET_ADDR =~ ^0x[0-9a-fA-F]+$ || -z ${W_PID[$TARGET_ADDR]:-} ]]; then
+    [[ $1 == focused ]] && ERROR="The focused window is not a terminal." || ERROR="That terminal window is not open."
+    return 1
+  fi
+}
+
+# One window's corners on or off: on keeps a radius it already had, else
+# takes the global slider's; off is square.
+cmd_window_corners() {
+  local target=$1 choice=${2:-} want now
+  lock_state
+  load_state
+  scan
+  if ! window_target "$target"; then
+    unlock_state
+    return 1
+  fi
+  local addr=$TARGET_ADDR
+  now=$(radius_of "$addr")
+  case "$choice" in
+    on | true | 1) want=1 ;;
+    off | false | 0) want=0 ;;
+    toggle) (( now > 0 )) && want=0 || want=1 ;;
+    *)
+      unlock_state
+      ERROR="A window's corners are on, off or toggle."
+      return 1
+      ;;
+  esac
+  if (( want )); then
+    (( now > 0 )) && ROV[$addr]=$now || ROV[$addr]=${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}
+  else
+    ROV[$addr]=0
+  fi
+  ROVPID[$addr]=${W_PID[$addr]}
+  save_state
+  unlock_state
+  queue_round "$addr" "${ROV[$addr]}"
+  flush_props
+}
+
+cmd_window_radius() {
+  local target=$1 value=${2:-}
+  if ! [[ $value =~ ^[0-9]+$ ]] || (( value < CORNER_RADIUS_MIN || value > CORNER_RADIUS_MAX )); then
+    ERROR="Corner radius is $CORNER_RADIUS_MIN to $CORNER_RADIUS_MAX px."
+    return 1
+  fi
+  lock_state
+  load_state
+  scan
+  if ! window_target "$target"; then
+    unlock_state
+    return 1
+  fi
+  ROV[$TARGET_ADDR]=$value
+  ROVPID[$TARGET_ADDR]=${W_PID[$TARGET_ADDR]}
+  save_state
+  unlock_state
+  queue_round "$TARGET_ADDR" "$value"
+  flush_props
+}
+
+# A step of one window's radius drag: shown, not saved. Uses the windows the
+# last scan found, so it starts no hyprctl clients query per step.
+cmd_window_radius_preview() {
+  [[ ${1:-} =~ ^0x[0-9a-fA-F]+$ && ${2:-} =~ ^[0-9]+$ ]] || return 1
+  queue_round "$1" "$(clamp "$2" "$CORNER_RADIUS_MIN" "$CORNER_RADIUS_MAX")"
+  flush_props
 }
 
 # On forces Omarchy's rounded corners on every window; off hands them back to
@@ -1661,6 +1805,11 @@ cmd_corners() {
     ERROR="Omarchy couldn't change the corners. Try: omarchy hyprland corners $want"
     return 1
   fi
+  lock_state
+  load_state
+  scan
+  unlock_state
+  apply_window_corners
   return 0
 }
 
@@ -1862,6 +2011,7 @@ cmd_reapply() {
   done
   restore_includes
   follow_frost
+  apply_window_corners
 }
 
 # Forget the default and every override: terminals follow their theme again.
@@ -1872,6 +2022,8 @@ cmd_reset() {
   DEFAULT=""
   OV=()
   OVPID=()
+  # A window's own radius can't be cleared, only kept on the global one.
+  for addr in "${!ROV[@]}"; do ROV[$addr]=follow; done
   save_state
   write_includes ""
   unlock_state
@@ -1902,6 +2054,7 @@ cmd_reset() {
   # The theme decides the terminals again, and so the dropdowns that match.
   load_foot_config
   follow_frost
+  apply_window_corners
 }
 
 cmd_install() {
@@ -1977,9 +2130,17 @@ cmd_serve() {
         glasspreview) cmd_glass_preview "${a:-}" "${b:-}" ;;
         strength) cmd_strength "${a:-}"; emit_state ;;
         strengthpreview) cmd_strength_preview "${a:-}" ;;
-        radius) cmd_radius "${a:-}"; emit_state ;;
-        radiuspreview) cmd_radius_preview "${a:-}" ;;
-        corners) cmd_corners "${a:-}"; emit_state ;;
+        radius)
+          if [[ -n ${b:-} ]]; then cmd_window_radius "$a" "$b"; else cmd_radius "${a:-}"; fi
+          emit_state
+          ;;
+        radiuspreview)
+          if [[ -n ${b:-} ]]; then cmd_window_radius_preview "$a" "$b"; else cmd_radius_preview "${a:-}"; fi
+          ;;
+        corners)
+          if [[ -n ${b:-} ]]; then cmd_window_corners "$a" "$b"; else cmd_corners "${a:-}"; fi
+          emit_state
+          ;;
         quit) break ;;
       esac
     elif (( $? > 128 )); then
@@ -2007,8 +2168,10 @@ Usage: terminal-opacity <command>
   glass <on|off|toggle>            Frosted glass: a heavier, lighter Hyprland blur
   glass brightness <50-200>        Its brightness (100 leaves it as is)
   strength <0-100>                 Blur strength while terminals blur (size and passes)
-  corners <on|off|toggle|sharp>    Round window corners (off follows the theme)
-  radius <1-20>                    Their radius in px while rounded (Omarchy's is 6)
+  corners [focused|address] <on|off|toggle|sharp>
+                                   Round window corners (off follows the theme);
+                                   with a window, just that one until it closes
+  radius [focused|address] <1-20>  Their radius in px (Omarchy's is 6), or one window's
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme
@@ -2070,8 +2233,13 @@ case "$command" in
     exit $status
     ;;
   glass | corners | strength | radius)
-    (( $# == 1 )) || [[ $# == 2 && $command == glass ]] || usage
-    "cmd_$command" "$@"
+    (( $# == 1 )) || [[ $# == 2 && $command != strength ]] || usage
+    if [[ $# == 2 && $command != glass ]]; then
+      cmd_sync
+      "cmd_window_$command" "$@"
+    else
+      "cmd_$command" "$@"
+    fi
     status=$?
     cmd_sync
     emit_state

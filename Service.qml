@@ -43,6 +43,8 @@ Item {
   // Rounded corner radius in px, in effect while rounded corners are on.
   property int cornerRadius: 6
   property string glassPreviewWhat: ""
+  // The window a radius drag is for, or "" for the global corners.
+  property string glassPreviewTarget: ""
   property int glassPreviewValue: -1
   property string corners: "theme"
   property string note: ""
@@ -137,6 +139,11 @@ Item {
     send("corners " + (on ? "on" : "off"))
   }
 
+  // One window's corners, until it closes.
+  function setWindowCorners(address, on) {
+    send("corners " + address + " " + (on ? "on" : "off"))
+  }
+
   // A drag step is set live in Hyprland without a reload; steps faster than
   // that collapse into the latest. Release saves it. `what` is "brightness"
   // (Frosted glass), "strength" (Blur what shows through) or "radius"
@@ -147,17 +154,23 @@ Item {
     return Math.max(low, Math.min(high, Math.round(value)))
   }
 
-  function previewGlass(what, value) {
-    if (glassPreviewWhat !== "" && glassPreviewWhat !== what) glassTimer.stop()
+  function previewGlass(what, value, target) {
+    var to = target || ""
+    if (glassPreviewWhat !== "" && (glassPreviewWhat !== what || glassPreviewTarget !== to)) glassTimer.stop()
     glassPreviewWhat = what
+    glassPreviewTarget = to
     glassPreviewValue = glassClamp(what, value)
     if (!glassTimer.running) glassTimer.start()
   }
 
-  function commitGlass(what, value) {
+  function commitGlass(what, value, target) {
     glassTimer.stop()
     glassPreviewValue = -1
     var v = glassClamp(what, value)
+    if (what === "radius" && target) {
+      send("radius " + target + " " + v)
+      return
+    }
     if (what === "strength") {
       blurStrength = v
       send("strength " + v)
@@ -246,7 +259,7 @@ Item {
       if (root.glassPreviewValue < 0) return
       var verb = root.glassPreviewWhat === "strength" ? "strengthpreview"
         : root.glassPreviewWhat === "radius" ? "radiuspreview" : "glasspreview"
-      root.send(verb + " " + root.glassPreviewValue)
+      root.send(verb + " " + (root.glassPreviewTarget ? root.glassPreviewTarget + " " : "") + root.glassPreviewValue)
       root.glassPreviewValue = -1
     }
   }

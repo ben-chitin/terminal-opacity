@@ -58,6 +58,24 @@ itself is 38% solid with blur behind it, like the terminals.
 **All terminals** saves a default. New terminals open with it, and it survives
 theme changes. One window's value is its own until that window closes.
 
+### What follows the window you pick
+
+Pick one window and these apply to just that window, until it closes:
+
+- the background opacity
+- **Blur what shows through**
+- **Round window corners** and its **Corner radius**
+
+The rest are one setting for everything, because Hyprland or the bar has only
+one of each: Blur strength, Frosted glass and its brightness, and Frost bar
+dropdowns. While a window is picked their headers say **Every window**.
+**Fade painted backgrounds too** is still one choice for every terminal: Foot
+reads it only when a window opens, and Kitty and Ghostty only per process.
+
+Hyprland can't clear a window's own corner radius once set. **Follow the
+theme again** keeps such a window on the global corners instead, and the
+widget tells it each time those change, until it closes.
+
 ## Blur
 
 Hyprland blurs what shows through a see-through window whenever its blur is
@@ -172,6 +190,8 @@ whatever the theme draws. `uninstall` leaves it as it is.
 terminal-opacity corners on    # omarchy hyprland corners rounded
 terminal-opacity corners off   # omarchy hyprland corners theme
 terminal-opacity radius 12     # 1 to 20 px; Omarchy's rounded is 6
+terminal-opacity corners focused off     # just the focused window
+terminal-opacity radius focused 16       # just the focused window
 ```
 
 While it is on, a **Corner radius** slider sits under the switch, from 1 to
