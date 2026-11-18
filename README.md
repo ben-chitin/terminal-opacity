@@ -64,6 +64,33 @@ itself is 38% solid with blur behind it, like the terminals.
 **All terminals** saves a default. New terminals open with it, and it survives
 theme changes. One window's value is its own until that window closes.
 
+### Saving a look for a theme
+
+**Save this look for <theme>** stores the settings for every window under the
+current theme: opacity, blur and its strength, frosted glass and its
+brightness, painted backgrounds, frosted dropdowns, corners and their radius,
+and whether Omarchy's windows are Glassy. One window's own settings are not
+part of it, since they go when it closes.
+
+Setting that theme again, from anywhere, loads the look: the widget's
+theme-set hook does it. A theme with nothing saved keeps whatever is set when
+it is switched to. **Reset to <theme>'s defaults** still goes back to the
+theme's own settings; the saved look stays, and loads the next time the theme
+is set. **Forget <theme>'s saved look** drops it (a second click first) and
+leaves what is set alone.
+
+Looks are kept in `~/.local/state/omarchy/terminal-opacity-looks.json`.
+
+```sh
+terminal-opacity look save
+terminal-opacity look apply            # the current theme's
+terminal-opacity look list
+terminal-opacity look forget
+```
+
+Upgrading from an earlier version: run `terminal-opacity install` once so the
+theme-set hook loads saved looks.
+
 ### What follows the window you pick
 
 Pick one window and these apply to just that window, until it closes:

@@ -41,6 +41,8 @@ Item {
   // or Hyprland rules of its own, which a reset hands back to it.
   property bool themeOwn: false
   property string themeName: ""
+  // A look is saved for the current theme.
+  property bool lookSaved: false
   // Frosted glass brightness, a percent of Hyprland's: 100 leaves it as is.
   property int glassBrightness: 115
   // Blur strength, 0 to 100: Hyprland's blur size and passes together, in
@@ -95,6 +97,10 @@ Item {
 
   // Everything back to Omarchy's defaults, not just the opacity.
   function reset() { send("reset all") }
+
+  // The look set now, saved for the current theme; or forgotten.
+  function saveLook() { send("look save") }
+  function forgetLook() { send("look forget") }
 
   function setCells(on) {
     cells = on
@@ -217,6 +223,7 @@ Item {
     customized = data.customized === true
     themeOwn = data.themeOwn === true
     themeName = String(data.themeName || "")
+    lookSaved = data.lookSaved === true
     if (typeof data.glassBrightness === "number") glassBrightness = data.glassBrightness
     if (typeof data.blurStrength === "number") blurStrength = data.blurStrength
     if (typeof data.cornerRadius === "number") cornerRadius = data.cornerRadius

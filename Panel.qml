@@ -82,6 +82,11 @@ Panel {
 
   readonly property string allAddress: "*"
   readonly property string resetAddress: "!reset"
+  readonly property string saveAddress: "!save"
+  readonly property string forgetAddress: "!forget"
+  readonly property bool lookSaved: service ? service.lookSaved : false
+  readonly property string themeLabel: service && service.themeName !== "" ? service.themeName : "this theme"
+  property bool confirmingForget: false
   readonly property bool customized: service ? service.customized : false
   // Whose defaults a reset goes back to: the theme's, where it sets any of
   // what is here, else Omarchy's.
@@ -141,6 +146,24 @@ Panel {
         opacity: w.opacity, solidText: w.solidText
       })
     }
+    list.push({
+      address: saveAddress,
+      title: "Save this look for " + themeLabel,
+      detail: lookSaved ? "Replaces the one saved. Loads whenever " + themeLabel + " is set"
+                        : "Loads whenever " + themeLabel + " is set",
+      opacity: -1,
+      solidText: true
+    })
+    if (lookSaved) {
+      list.push({
+        address: forgetAddress,
+        title: confirmingForget ? "Forget the saved look?" : "Forget " + themeLabel + "'s saved look",
+        detail: confirmingForget ? "Click or press Enter again. What is set now stays"
+                                 : "What is set now stays",
+        opacity: -1,
+        solidText: true
+      })
+    }
     if (customized || defaultSet || anyOverride) {
       list.push({
         address: resetAddress,
@@ -194,7 +217,7 @@ Panel {
   }
 
   function selectAddress(address) {
-    if (address === resetAddress || address === selectedAddress) return
+    if (isAction(address) || address === selectedAddress) return
     selectedAddress = address
     pendingWindowRadius = -1
     if (!opacitySlider.dragging) shownPercent = opacityOf(address)
@@ -239,6 +262,31 @@ Panel {
       return
     }
     commit(shownPercent + delta)
+  }
+
+  function saveLook() {
+    if (service) service.saveLook()
+  }
+
+  function forgetLook() {
+    if (!confirmingForget) {
+      confirmingForget = true
+      resetConfirmTimer.restart()
+      return
+    }
+    confirmingForget = false
+    if (service) service.forgetLook()
+  }
+
+  // The rows that do something rather than pick what the slider applies to.
+  function isAction(address) {
+    return address === resetAddress || address === saveAddress || address === forgetAddress
+  }
+
+  function runAction(address) {
+    if (address === resetAddress) reset()
+    else if (address === saveAddress) saveLook()
+    else if (address === forgetAddress) forgetLook()
   }
 
   function reset() {
@@ -375,7 +423,7 @@ Panel {
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
-    if (rows[selectedIndex].address === resetAddress) reset()
+    if (isAction(rows[selectedIndex].address)) runAction(rows[selectedIndex].address)
     else toggleBlur()
   }
 
@@ -423,11 +471,15 @@ Panel {
   Timer {
     id: resetConfirmTimer
     interval: 5000
-    onTriggered: root.confirmingReset = false
+    onTriggered: {
+      root.confirmingReset = false
+      root.confirmingForget = false
+    }
   }
 
   onOpenedChanged: {
     confirmingReset = false
+    confirmingForget = false
     if (service) service.viewers += opened ? 1 : -1
     if (!opened) return
     selectedAddress = allAddress
@@ -1215,7 +1267,7 @@ Panel {
                 id: row
                 required property var modelData
                 required property int index
-                readonly property bool isReset: modelData.address === root.resetAddress
+                readonly property bool isReset: root.isAction(modelData.address)
                 width: parent.width
                 implicitHeight: rowText.implicitHeight + Style.space(12)
                 hasCursor: root.cursorActive && root.focusSection === "rows" && root.selectedIndex === index
@@ -1277,7 +1329,7 @@ Panel {
                     root.focusSection = "rows"
                     root.selectedIndex = row.index
                   }
-                  onClicked: row.isReset ? root.reset() : root.selectAddress(row.modelData.address)
+                  onClicked: row.isReset ? root.runAction(row.modelData.address) : root.selectAddress(row.modelData.address)
                 }
               }
             }

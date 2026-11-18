@@ -43,6 +43,8 @@ set -uo pipefail
 PLUGIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE="$STATE_DIR/terminal-opacity-v2.json"
+# Looks saved per theme: the settings here, loaded when that theme is set.
+LOOKS="$STATE_DIR/terminal-opacity-looks.json"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 THEME_DIR="$STATE_DIR/current/theme"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
@@ -987,7 +989,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg customized "$(customized && printf 1)" --arg themeOwn "$THEME_OWN" --arg themeName "$THEME_DISPLAY" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg customized "$(customized && printf 1)" --arg themeOwn "$THEME_OWN" --arg themeName "$THEME_DISPLAY" --arg lookSaved "$(look_saved && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -1006,6 +1008,7 @@ emit_state() {
       customized: ($customized == "1"),
       themeOwn: ($themeOwn == "1"),
       themeName: $themeName,
+      lookSaved: ($lookSaved == "1"),
       glassBrightness: ($glassBrightness | tonumber),
       blurStrength: ($blurStrength | tonumber),
       cornerRadius: ($cornerRadius | tonumber),
@@ -2145,12 +2148,156 @@ cmd_reset_all() {
   fi
 }
 
+# --- Looks saved per theme ---------------------------------------------------
+#
+# "Save this look" stores the settings for every window (not one window's own,
+# which go when it closes) under the current theme's name. Setting that theme
+# again loads them, from the theme-set hook. A theme with nothing saved keeps
+# whatever is set when it is switched to.
+
+theme_name() {
+  local name=""
+  [[ -r $STATE_DIR/current/theme.name ]] && name=$(<"$STATE_DIR/current/theme.name")
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] && printf '%s' "$name"
+}
+
+look_saved() {
+  local name=${1:-$(theme_name)}
+  [[ -n $name && -f $LOOKS ]] && jq -e --arg t "$name" 'has($t)' "$LOOKS" >/dev/null 2>&1
+}
+
+cmd_look_save() {
+  local name tmp
+  name=$(theme_name)
+  if [[ -z $name ]]; then
+    ERROR="Couldn't tell which theme is set."
+    return 1
+  fi
+  lock_state
+  load_state
+  local look
+  look=$(jq -nc \
+    --arg default "$DEFAULT" --argjson blur "$BLUR" --argjson cells "$CELLS" --arg frost "$FROST" \
+    --argjson glass "$(glass_on && printf true || printf false)" --arg glassBrightness "$GLASS_BRIGHTNESS" \
+    --arg blurStrength "$BLUR_STRENGTH" --arg corners "$(corners_now)" --arg cornerRadius "$CORNER_RADIUS" \
+    --argjson glassy "$([[ -f $TOGGLES_DIR/window-glassy.lua ]] && printf true || printf false)" \
+    --argjson savedAt "$(date +%s)" '
+    def num: if . == "" then null else tonumber end;
+    {
+      default: ($default | num), blur: ($blur == 1), cells: ($cells == 1),
+      frost: (if $frost == "" then null elif $frost == "follow" then "follow" else ($frost | tonumber) end),
+      glass: $glass, glassBrightness: ($glassBrightness | num),
+      blurStrength: ($blurStrength | num),
+      corners: $corners, cornerRadius: ($cornerRadius | num),
+      glassy: $glassy, savedAt: $savedAt
+    }')
+  tmp=$(mktemp "$STATE_DIR/terminal-opacity-looks.XXXXXX") || { unlock_state; return 1; }
+  if ! { [[ -f $LOOKS ]] && cat "$LOOKS" || printf '{}'; } |
+    jq --arg t "$name" --argjson look "$look" '(if type == "object" then . else {} end) | .[$t] = $look' >"$tmp"; then
+    rm -f "$tmp"
+    unlock_state
+    ERROR="Couldn't save the look."
+    return 1
+  fi
+  mv -f "$tmp" "$LOOKS"
+  unlock_state
+  theme_info
+  NOTE="Saved. This look loads whenever $THEME_DISPLAY is set."
+}
+
+cmd_look_forget() {
+  local name tmp
+  name=$(theme_name)
+  look_saved "$name" || return 0
+  lock_state
+  tmp=$(mktemp "$STATE_DIR/terminal-opacity-looks.XXXXXX") || { unlock_state; return 1; }
+  jq --arg t "$name" 'del(.[$t])' "$LOOKS" >"$tmp" && mv -f "$tmp" "$LOOKS" || rm -f "$tmp"
+  unlock_state
+  theme_info
+  NOTE="$THEME_DISPLAY's saved look is forgotten. What is set now stays."
+}
+
+# Puts a saved look in place: every setting it holds, in an order that keeps
+# reloads few, then every terminal told its values.
+cmd_look_apply() {
+  local name=${1:-$(theme_name)} line key value
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || { ERROR="No such theme."; return 1; }
+  if ! look_saved "$name"; then
+    ERROR="Nothing is saved for that theme."
+    return 1
+  fi
+  local -A L=()
+  while IFS=$'\t' read -r key value; do
+    L[$key]=$value
+  done < <(jq -r --arg t "$name" '.[$t] | to_entries[] | "\(.key)\t\(.value // "")"' "$LOOKS" 2>/dev/null)
+
+  # Glassy first: it rewrites the theme's terminal files, which the rest
+  # then lays its values over.
+  local glassy_now=false
+  [[ -f $TOGGLES_DIR/window-glassy.lua ]] && glassy_now=true
+  if [[ ${L[glassy]:-false} != "$glassy_now" ]] && command -v omarchy >/dev/null 2>&1; then
+    if [[ ${L[glassy]} == true ]]; then
+      omarchy hyprland window transparency glassy >/dev/null 2>&1
+    else
+      omarchy hyprland window transparency transparent >/dev/null 2>&1
+    fi
+  fi
+
+  if [[ ${L[default]:-} =~ ^[0-9]+$ ]]; then
+    cmd_sync
+    cmd_commit all "${L[default]}"
+  else
+    cmd_reset
+  fi
+  [[ ${L[blur]:-false} == true ]] && cmd_blur all on || cmd_blur all off
+  [[ ${L[cells]:-false} == true ]] && cmd_cells on || cmd_cells off
+  case "${L[frost]:-}" in
+    "") cmd_frost off ;;
+    *) cmd_frost "${L[frost]}" ;;
+  esac
+
+  lock_state
+  load_state
+  GLASS_BRIGHTNESS=""
+  [[ ${L[glassBrightness]:-} =~ ^[0-9]+$ ]] && GLASS_BRIGHTNESS=${L[glassBrightness]}
+  BLUR_STRENGTH=""
+  [[ ${L[blurStrength]:-} =~ ^[0-9]+$ ]] && BLUR_STRENGTH=${L[blurStrength]}
+  CORNER_RADIUS=""
+  [[ ${L[cornerRadius]:-} =~ ^[0-9]+$ ]] && CORNER_RADIUS=${L[cornerRadius]}
+  save_state
+  unlock_state
+
+  # The files these write load on the reload the corners or glass make.
+  rm -f "$STRENGTH_FILE"
+  [[ -n $CORNER_RADIUS ]] && write_corners || rm -f "$CORNERS_FILE"
+  if [[ ${L[glass]:-false} == true ]]; then write_glass; else rm -f "$GLASS_FILE"; fi
+  case "${L[corners]:-theme}" in
+    rounded | sharp | theme) omarchy hyprland corners "${L[corners]:-theme}" >/dev/null 2>&1 ;;
+  esac
+  cmd_sync            # writes the strength file when some terminal blurs
+  hypr_reload_ok
+  cmd_reapply
+  theme_info
+  [[ -n $ERROR ]] || NOTE="Loaded the look saved for $THEME_DISPLAY."
+}
+
+# The theme-set hook: a theme with a saved look gets it; any other keeps
+# what is set, put back on the terminals the theme change has just reset.
+cmd_theme_changed() {
+  if look_saved; then
+    cmd_look_apply
+  else
+    cmd_reapply
+  fi
+}
+
 cmd_install() {
   mkdir -p "${HOOK%/*}"
   printf '%s\n' '#!/bin/bash' \
     "# A theme change resets every terminal's background to the theme's own." \
-    '# Put the Terminal opacity widget'"'"'s values back.' \
-    "exec \"$PLUGIN_DIR/terminal-opacity\" reapply >/dev/null 2>&1" >"$HOOK"
+    '# Load the look the Terminal opacity widget saved for the new theme, or' \
+    '# put its values back when there is none.' \
+    "exec \"$PLUGIN_DIR/terminal-opacity\" theme-changed >/dev/null 2>&1" >"$HOOK"
   chmod 755 "$HOOK"
   # Version 1's hook ran terminal-opacity.sh, which is gone: it fails quietly
   # on every theme change.
@@ -2232,6 +2379,14 @@ cmd_serve() {
           if [[ -n ${b:-} ]]; then cmd_window_corners "$a" "$b"; else cmd_corners "${a:-}"; fi
           emit_state
           ;;
+        look)
+          case "${a:-}" in
+            save) cmd_look_save ;;
+            forget) cmd_look_forget ;;
+            apply) cmd_look_apply ;;
+          esac
+          emit_state
+          ;;
         quit) break ;;
       esac
     elif (( $? > 128 )); then
@@ -2266,7 +2421,10 @@ Usage: terminal-opacity <command>
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved opacities and follow the theme
-  reset all                        Everything back to Omarchy's defaults
+  reset all                        Everything back to the theme's or Omarchy's defaults
+  look <save|forget|apply [theme]|list>
+                                   This look saved for the current theme, loaded
+                                   whenever that theme is set
   install                          Add the bar widget and the theme-change hook
   uninstall                        Remove the hook, state and config includes
 EOF
@@ -2340,6 +2498,19 @@ case "$command" in
     emit_state
     exit $status
     ;;
+  look)
+    case "${1:-}" in
+      save) cmd_look_save ;;
+      forget) cmd_look_forget ;;
+      apply) cmd_look_apply "${2:-}" ;;
+      list) [[ -f $LOOKS ]] && jq -r 'keys[]' "$LOOKS"; exit 0 ;;
+      *) usage ;;
+    esac
+    status=$?
+    emit_state
+    exit $status
+    ;;
+  theme-changed) cmd_theme_changed ;;
   colors) cmd_colors "$@" ;;
   install) cmd_install ;;
   uninstall) cmd_uninstall ;;
