@@ -80,6 +80,13 @@ GLASS_BRIGHTNESS_MAX=200
 # after the glass file so it wins over Frosted glass's size too. Without it,
 # Glassy blurs at what is 10% here and Frosted glass at 40%.
 STRENGTH_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-strength.lua"
+# Corner radius in px while Omarchy's rounded corners are on, which are 6 px.
+# The file checks for Omarchy's corners-rounded.lua itself as Hyprland loads
+# it, so it never rounds corners Omarchy has handed back to the theme.
+CORNERS_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-corners.lua"
+CORNER_RADIUS_DEFAULT=6
+CORNER_RADIUS_MIN=1
+CORNER_RADIUS_MAX=20
 
 # Apps that hold a pty without being a terminal emulator.
 NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
@@ -98,6 +105,7 @@ FROST=""            # bar dropdowns while frosted: a percent, or "follow" to mat
 FROST_LAST=""       # what it was before it was last turned off
 GLASS_BRIGHTNESS="" # frosted glass brightness percent; empty for the default
 BLUR_STRENGTH=""    # blur strength percent; empty to leave it to Glassy or Frosted glass
+CORNER_RADIUS=""    # rounded corner radius in px; empty for Omarchy's 6
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
@@ -121,6 +129,7 @@ load_state() {
   FROST_LAST=""
   GLASS_BRIGHTNESS=""
   BLUR_STRENGTH=""
+  CORNER_RADIUS=""
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
@@ -143,6 +152,9 @@ load_state() {
         [[ $a =~ ^[0-9]+$ ]] && (( a >= GLASS_BRIGHTNESS_MIN && a <= GLASS_BRIGHTNESS_MAX )) && GLASS_BRIGHTNESS=$a
         ;;
       blurStrength) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && BLUR_STRENGTH=$a ;;
+      cornerRadius)
+        [[ $a =~ ^[0-9]+$ ]] && (( a >= CORNER_RADIUS_MIN && a <= CORNER_RADIUS_MAX )) && CORNER_RADIUS=$a
+        ;;
       cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
@@ -166,6 +178,7 @@ load_state() {
      elif .frostLast == "follow" then "frostLast\tfollow" else empty end),
     (if (.glassBrightness | type) == "number" then "glassBrightness\t\(.glassBrightness | floor)" else empty end),
     (if (.blurStrength | type) == "number" then "blurStrength\t\(.blurStrength | floor)" else empty end),
+    (if (.cornerRadius | type) == "number" then "cornerRadius\t\(.cornerRadius | floor)" else empty end),
     ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
@@ -198,9 +211,9 @@ save_state() {
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
   local changes=${CELLS_CHANGES// /,}
-  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"glassBrightness":%s,"blurStrength":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
+  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"glassBrightness":%s,"blurStrength":%s,"cornerRadius":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "${GLASS_BRIGHTNESS:-null}" "${BLUR_STRENGTH:-null}" "$changes" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "${GLASS_BRIGHTNESS:-null}" "${BLUR_STRENGTH:-null}" "${CORNER_RADIUS:-null}" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -949,7 +962,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -967,6 +980,7 @@ emit_state() {
       glass: ($glass == "1"),
       glassBrightness: ($glassBrightness | tonumber),
       blurStrength: ($blurStrength | tonumber),
+      cornerRadius: ($cornerRadius | tonumber),
       corners: $corners,
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
@@ -1555,6 +1569,76 @@ cmd_glass() {
   return 0
 }
 
+# A path as a Lua string literal.
+lua_string() {
+  local v=${1//\\/\\\\}
+  printf '"%s"' "${v//\"/\\\"}"
+}
+
+write_corners() {
+  mkdir -p "$TOGGLES_DIR" || return 1
+  local tmp
+  tmp=$(mktemp "$TOGGLES_DIR/.corners.XXXXXX") || return 1
+  cat >"$tmp" <<EOF
+-- Written by the Terminal opacity bar widget (bhj.terminal-opacity): its
+-- Corner radius slider, at $CORNER_RADIUS px. It applies only while Omarchy's
+-- rounded corners are on, so corners handed back to the theme stay the theme's.
+local rounded = io.open($(lua_string "$TOGGLES_DIR/corners-rounded.lua"), "r")
+if rounded then
+  rounded:close()
+  hl.config({
+    decoration = {
+      rounding = $CORNER_RADIUS,
+    },
+  })
+end
+EOF
+  if [[ -f $CORNERS_FILE ]] && cmp -s "$tmp" "$CORNERS_FILE"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$CORNERS_FILE"
+}
+
+set_live_radius() {
+  timeout 2 hyprctl eval "hl.config({ decoration = { rounding = $1 } })" >/dev/null 2>&1
+}
+
+# A new corner radius: saved, written so it outlasts a reload, and set live
+# while rounded corners are on.
+cmd_radius() {
+  local value=${1:-}
+  if ! [[ $value =~ ^[0-9]+$ ]] || (( value < CORNER_RADIUS_MIN || value > CORNER_RADIUS_MAX )); then
+    ERROR="Corner radius is $CORNER_RADIUS_MIN to $CORNER_RADIUS_MAX px."
+    return 1
+  fi
+  lock_state
+  load_state
+  CORNER_RADIUS=$value
+  save_state
+  unlock_state
+  write_corners || {
+    ERROR="Couldn't write $CORNERS_FILE."
+    return 1
+  }
+  if [[ $(corners_now) != rounded ]]; then
+    NOTE="Saved. It applies when \"Round window corners\" is on."
+    return 0
+  fi
+  if ! set_live_radius "$value"; then
+    ERROR="Saved, but Hyprland didn't take it live. Check: hyprctl configerrors"
+    return 1
+  fi
+  return 0
+}
+
+# A step of a radius drag: shown, not saved.
+cmd_radius_preview() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] || return 1
+  [[ $(corners_now) == rounded ]] || return 0
+  set_live_radius "$(clamp "$1" "$CORNER_RADIUS_MIN" "$CORNER_RADIUS_MAX")"
+}
+
 # On forces Omarchy's rounded corners on every window; off hands them back to
 # the theme, which is Omarchy's own default.
 cmd_corners() {
@@ -1859,12 +1943,12 @@ cmd_uninstall() {
   flush_props
   unwire
   write_frost ""
-  if glass_on || [[ -f $STRENGTH_FILE ]]; then
-    rm -f "$GLASS_FILE" "$STRENGTH_FILE"
+  if glass_on || [[ -f $STRENGTH_FILE || -f $CORNERS_FILE ]]; then
+    rm -f "$GLASS_FILE" "$STRENGTH_FILE" "$CORNERS_FILE"
     hypr_reload_ok
   fi
   rm -f "$HOOK" "$STATE"
-  echo "Terminal opacity's hook, state, config includes, dropdown frost, frosted glass and blur strength are removed."
+  echo "Terminal opacity's hook, state, config includes, dropdown frost, frosted glass, blur strength and corner radius are removed."
   echo "Window corners are Omarchy's own setting and stay as they are: omarchy hyprland corners theme"
   echo "Take the widget out of the bar in ~/.config/omarchy/shell.json, then delete $PLUGIN_DIR."
 }
@@ -1893,6 +1977,8 @@ cmd_serve() {
         glasspreview) cmd_glass_preview "${a:-}" "${b:-}" ;;
         strength) cmd_strength "${a:-}"; emit_state ;;
         strengthpreview) cmd_strength_preview "${a:-}" ;;
+        radius) cmd_radius "${a:-}"; emit_state ;;
+        radiuspreview) cmd_radius_preview "${a:-}" ;;
         corners) cmd_corners "${a:-}"; emit_state ;;
         quit) break ;;
       esac
@@ -1922,6 +2008,7 @@ Usage: terminal-opacity <command>
   glass brightness <50-200>        Its brightness (100 leaves it as is)
   strength <0-100>                 Blur strength while terminals blur (size and passes)
   corners <on|off|toggle|sharp>    Round window corners (off follows the theme)
+  radius <1-20>                    Their radius in px while rounded (Omarchy's is 6)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
   reset                            Forget saved values and follow the theme
@@ -1982,7 +2069,7 @@ case "$command" in
     emit_state
     exit $status
     ;;
-  glass | corners | strength)
+  glass | corners | strength | radius)
     (( $# == 1 )) || [[ $# == 2 && $command == glass ]] || usage
     "cmd_$command" "$@"
     status=$?

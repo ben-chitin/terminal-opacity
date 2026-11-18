@@ -40,6 +40,8 @@ Item {
   // Blur strength, 0 to 100: Hyprland's blur size and passes together, in
   // effect while some terminal is blurred.
   property int blurStrength: 10
+  // Rounded corner radius in px, in effect while rounded corners are on.
+  property int cornerRadius: 6
   property string glassPreviewWhat: ""
   property int glassPreviewValue: -1
   property string corners: "theme"
@@ -137,10 +139,11 @@ Item {
 
   // A drag step is set live in Hyprland without a reload; steps faster than
   // that collapse into the latest. Release saves it. `what` is "brightness"
-  // (Frosted glass) or "strength" (Blur what shows through).
+  // (Frosted glass), "strength" (Blur what shows through) or "radius"
+  // (Round window corners).
   function glassClamp(what, value) {
-    var low = what === "strength" ? 0 : 50
-    var high = what === "strength" ? 100 : 200
+    var low = what === "strength" ? 0 : what === "radius" ? 1 : 50
+    var high = what === "strength" ? 100 : what === "radius" ? 20 : 200
     return Math.max(low, Math.min(high, Math.round(value)))
   }
 
@@ -158,6 +161,9 @@ Item {
     if (what === "strength") {
       blurStrength = v
       send("strength " + v)
+    } else if (what === "radius") {
+      cornerRadius = v
+      send("radius " + v)
     } else {
       glassBrightness = v
       send("glass brightness " + v)
@@ -190,6 +196,7 @@ Item {
     glass = data.glass === true
     if (typeof data.glassBrightness === "number") glassBrightness = data.glassBrightness
     if (typeof data.blurStrength === "number") blurStrength = data.blurStrength
+    if (typeof data.cornerRadius === "number") cornerRadius = data.cornerRadius
     if (typeof data.corners === "string") corners = data.corners
     switchingGlassy = false
     note = String(data.note || "")
@@ -237,9 +244,9 @@ Item {
     interval: 40
     onTriggered: {
       if (root.glassPreviewValue < 0) return
-      root.send(root.glassPreviewWhat === "strength"
-        ? "strengthpreview " + root.glassPreviewValue
-        : "glasspreview " + root.glassPreviewValue)
+      var verb = root.glassPreviewWhat === "strength" ? "strengthpreview"
+        : root.glassPreviewWhat === "radius" ? "radiuspreview" : "glasspreview"
+      root.send(verb + " " + root.glassPreviewValue)
       root.glassPreviewValue = -1
     }
   }

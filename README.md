@@ -49,7 +49,9 @@ itself is 38% solid with blur behind it, like the terminals.
   follow the All terminals slider (see [Frosted dropdowns](#frosted-dropdowns)).
   Off at first.
 - **Round window corners** turns on Omarchy's rounded corners for every
-  window, whatever the theme. Off hands the corners back to the theme.
+  window, whatever the theme. Off hands the corners back to the theme. While
+  it is on, a **Corner radius** slider sits under it (see
+  [Round corners](#round-corners)).
 - **Follow the theme again** forgets the opacity saved here. It leaves the
   blur choice alone.
 
@@ -169,7 +171,16 @@ whatever the theme draws. `uninstall` leaves it as it is.
 ```sh
 terminal-opacity corners on    # omarchy hyprland corners rounded
 terminal-opacity corners off   # omarchy hyprland corners theme
+terminal-opacity radius 12     # 1 to 20 px; Omarchy's rounded is 6
 ```
+
+While it is on, a **Corner radius** slider sits under the switch, from 1 to
+20 px (Hyprland's limit); Omarchy's own 6 px at first. Dragging changes the
+corners live with `hyprctl eval`; letting go saves it to
+`~/.local/state/omarchy/toggles/hypr/zz-bhj-terminal-opacity-corners.lua`.
+That file checks for Omarchy's `corners-rounded.lua` as Hyprland loads it, so
+it does nothing once the corners are handed back to the theme, however that
+happens. The slider goes away when the switch is off, and the radius is kept.
 
 ## Painted backgrounds
 
@@ -246,8 +257,8 @@ The first change adds one include line to each terminal config that exists
 "Reloaded the configuration" toast, which would otherwise show on every step.
 
 `terminal-opacity uninstall` removes the hook, the saved state, those
-includes, the dropdown frost line, and the frosted glass and blur strength
-files.
+includes, the dropdown frost line, and the frosted glass, blur strength and corner
+radius files.
 
 ## Command line
 
@@ -263,6 +274,7 @@ terminal-opacity frost on
 terminal-opacity glass toggle
 terminal-opacity strength 60
 terminal-opacity corners toggle
+terminal-opacity radius 12
 terminal-opacity colors grok
 terminal-opacity nudge focused -5
 terminal-opacity reapply

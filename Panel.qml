@@ -36,6 +36,8 @@ Panel {
   }
   readonly property string corners: service ? service.corners : "theme"
   readonly property bool rounded: corners === "rounded"
+  readonly property int cornerRadius: service ? service.cornerRadius : 6
+  readonly property int radiusShown: radiusSlider.dragging ? Math.round(radiusSlider.liveValue) : cornerRadius
   // What the dropdowns show now, live while either slider is dragged.
   readonly property int frostShown: {
     if (frostSlider.dragging) return Math.round(frostSlider.liveValue)
@@ -199,6 +201,10 @@ Panel {
       if (service) service.commitGlass("brightness", glassBrightness + delta)
       return
     }
+    if (focusSection === "cornerRadius") {
+      if (service) service.commitGlass("radius", cornerRadius + Math.sign(delta))
+      return
+    }
     if (focusSection === "blurStrength") {
       if (service) service.commitGlass("strength", blurStrength + delta)
       return
@@ -244,7 +250,8 @@ Panel {
   }
 
   // Top to bottom: the slider, the switches in panel order (blur and its
-  // strength, frosted glass, painted backgrounds, dropdowns, corners; then the
+  // strength, frosted glass, painted backgrounds, dropdowns, corners and their
+  // radius; then the
   // Glassy button while
   // Hyprland's blur is off and something wants it), then the rows.
   readonly property var sections: {
@@ -255,6 +262,7 @@ Panel {
     list.push("cells", "frost")
     if (frost) list.push("frostSlider", "frostMode")
     list.push("corners")
+    if (rounded) list.push("cornerRadius")
     if (needsGlassy) list.push("glassy")
     return list
   }
@@ -323,7 +331,7 @@ Panel {
       toggleCorners()
       return
     }
-    if (focusSection === "frostSlider" || focusSection === "glassSlider" || focusSection === "blurStrength") return
+    if (focusSection === "frostSlider" || focusSection === "glassSlider" || focusSection === "blurStrength" || focusSection === "cornerRadius") return
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -346,10 +354,11 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onWindowsChanged: follow()
-  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "corners"
+  onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = rounded ? "cornerRadius" : "corners"
   onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
   onGlassChanged: if (!glass && focusSection === "glassSlider") focusSection = "glass"
   onAnyBlurChanged: if (!anyBlur && focusSection === "blurStrength") focusSection = "blur"
+  onRoundedChanged: if (!rounded && focusSection === "cornerRadius") focusSection = "corners"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -919,6 +928,85 @@ Panel {
               root.selectedIndex = -1
             }
             onClicked: root.toggleCorners()
+          }
+
+          // The corners' radius. Only there while rounded corners are on.
+          Column {
+            visible: root.rounded
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(radiusHeader.implicitHeight, radiusLabel.implicitHeight)
+
+              PanelSectionHeader {
+                id: radiusHeader
+                text: "CORNER RADIUS"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: radiusLabel
+                textFormat: Text.PlainText
+                text: root.radiusShown + " px"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            CursorSurface {
+              id: radiusSliderSurface
+              width: parent.width
+              height: radiusSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "cornerRadius"
+              foreground: root.bar.foreground
+              outline: true
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(radiusSliderSurface)
+
+              PanelSlider {
+                id: radiusSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: 1
+                maximum: 20
+                step: 1
+                integer: true
+                // The saved value only: tying it to the drag would hand the
+                // old value back the moment the slider lets go.
+                value: root.cornerRadius
+                onMoved: function(v) { if (root.service) root.service.previewGlass("radius", v) }
+                onReleased: function(v) { if (root.service) root.service.commitGlass("radius", v) }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "cornerRadius"
+                  root.selectedIndex = -1
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "1 px subtle  ·  6 px Omarchy  ·  20 px round"
+              color: Qt.darker(root.bar.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
           }
 
           // Hyprland's blur is off by default in Omarchy, and nothing this
