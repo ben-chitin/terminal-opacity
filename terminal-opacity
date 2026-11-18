@@ -74,8 +74,12 @@ GLASS_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-glass.lua"
 GLASS_BRIGHTNESS_DEFAULT=115
 GLASS_BRIGHTNESS_MIN=50
 GLASS_BRIGHTNESS_MAX=200
-# How strongly it blurs, 0 to 100: size and passes together (see size_of).
-GLASS_STRENGTH_DEFAULT=40
+# Blur strength, 0 to 100: Hyprland's blur size and passes together (see
+# size_of). It belongs to "Blur what shows through": its file is there only
+# while some terminal is blurred and a strength has been picked, and sorts
+# after the glass file so it wins over Frosted glass's size too. Without it,
+# Glassy blurs at what is 10% here and Frosted glass at 40%.
+STRENGTH_FILE="$TOGGLES_DIR/zz-bhj-terminal-opacity-strength.lua"
 
 # Apps that hold a pty without being a terminal emulator.
 NOT_TERMINALS='^(emacs|code|code-oss|codium|vscodium|cursor|zed|dev\.zed\..*|jetbrains-.*|neovide|nvim-qt|org\.kde\.kate|org\.gnome\.builder)$'
@@ -93,7 +97,7 @@ FROST=""            # bar dropdowns while frosted: a percent, or "follow" to mat
                     # terminals' default; empty when the theme decides
 FROST_LAST=""       # what it was before it was last turned off
 GLASS_BRIGHTNESS="" # frosted glass brightness percent; empty for the default
-GLASS_STRENGTH=""   # frosted glass strength percent; empty for the default
+BLUR_STRENGTH=""    # blur strength percent; empty to leave it to Glassy or Frosted glass
 CELLS_CHANGES=""    # when that changed, epoch seconds, latest last; Foot reads it at launch
 declare -A BOV=()    # window address -> blur override, 1 or 0
 declare -A BOVPID=() # window address -> pid the blur override was saved for
@@ -116,7 +120,7 @@ load_state() {
   FROST=""
   FROST_LAST=""
   GLASS_BRIGHTNESS=""
-  GLASS_STRENGTH=""
+  BLUR_STRENGTH=""
   CELLS_CHANGES=""
   BOV=()
   BOVPID=()
@@ -138,7 +142,7 @@ load_state() {
       glassBrightness)
         [[ $a =~ ^[0-9]+$ ]] && (( a >= GLASS_BRIGHTNESS_MIN && a <= GLASS_BRIGHTNESS_MAX )) && GLASS_BRIGHTNESS=$a
         ;;
-      glassStrength) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && GLASS_STRENGTH=$a ;;
+      blurStrength) [[ $a =~ ^[0-9]+$ ]] && (( a <= 100 )) && BLUR_STRENGTH=$a ;;
       cellsChanged) [[ $a =~ ^[0-9]+$ ]] && CELLS_CHANGES+="${CELLS_CHANGES:+ }$a" ;;
       window)
         [[ $a =~ ^0x[0-9a-fA-F]+$ && $b =~ ^[0-9]+$ ]] || continue
@@ -161,7 +165,7 @@ load_state() {
     (if (.frostLast | type) == "number" then "frostLast\t\(.frostLast | floor)"
      elif .frostLast == "follow" then "frostLast\tfollow" else empty end),
     (if (.glassBrightness | type) == "number" then "glassBrightness\t\(.glassBrightness | floor)" else empty end),
-    (if (.glassStrength | type) == "number" then "glassStrength\t\(.glassStrength | floor)" else empty end),
+    (if (.blurStrength | type) == "number" then "blurStrength\t\(.blurStrength | floor)" else empty end),
     ((.cellsChanged // []) | if type == "array" then .[] | select(type == "number") | "cellsChanged\t\(floor)" else empty end),
     ((.windows // {}) | to_entries[]
       | select((.value | type) == "object")
@@ -194,9 +198,9 @@ save_state() {
   done
   tmp=$(mktemp "$STATE_DIR/terminal-opacity.XXXXXX") || return 1
   local changes=${CELLS_CHANGES// /,}
-  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"glassBrightness":%s,"glassStrength":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
+  printf '{"default":%s,"blur":%s,"cells":%s,"frost":%s,"frostLast":%s,"glassBrightness":%s,"blurStrength":%s,"cellsChanged":[%s],"windows":{%s}}\n' "${DEFAULT:-null}" \
     "$( ((BLUR)) && printf true || printf false)" \
-    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "${GLASS_BRIGHTNESS:-null}" "${GLASS_STRENGTH:-null}" "$changes" "$body" >"$tmp"
+    "$( ((CELLS)) && printf true || printf false)" "$(frost_json)" "$(frost_json "$FROST_LAST")" "${GLASS_BRIGHTNESS:-null}" "${BLUR_STRENGTH:-null}" "$changes" "$body" >"$tmp"
   mv -f "$tmp" "$STATE"
 }
 
@@ -945,7 +949,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg glassStrength "$(glass_strength)" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -962,7 +966,7 @@ emit_state() {
       blurAvailable: ($blurAvailable == "true"),
       glass: ($glass == "1"),
       glassBrightness: ($glassBrightness | tonumber),
-      glassStrength: ($glassStrength | tonumber),
+      blurStrength: ($blurStrength | tonumber),
       corners: $corners,
       windows: [inputs | select(length > 0) | split("\u001f") | {
         address: .[0], title: .[1], terminal: .[2], emulator: .[3],
@@ -984,6 +988,7 @@ cmd_sync() {
   scan || save_state
   unlock_state
   adopt_new_windows
+  apply_strength
 }
 
 valid_percent() {
@@ -1110,6 +1115,7 @@ cmd_blur() {
   unlock_state
   queue_blur_all
   flush_props
+  apply_strength
   if (( want )) && [[ $BLUR_AVAILABLE != true ]]; then
     NOTE="Hyprland's blur is off, so nothing blurs yet. \"Turn on Hyprland's blur\" below fixes that."
   fi
@@ -1301,13 +1307,21 @@ hypr_reload_ok() {
   [[ -z ${errors//[[:space:]]/} ]]
 }
 
-# The frosted glass brightness and strength now, as percents.
+# The frosted glass brightness now, as a percent.
 glass_brightness() {
   printf '%s' "${GLASS_BRIGHTNESS:-$GLASS_BRIGHTNESS_DEFAULT}"
 }
 
-glass_strength() {
-  printf '%s' "${GLASS_STRENGTH:-$GLASS_STRENGTH_DEFAULT}"
+# The blur strength now: the one picked, or what Hyprland is left with
+# without one, which is Frosted glass's 40% or Glassy's 10%.
+blur_strength() {
+  if [[ -n $BLUR_STRENGTH ]]; then
+    printf '%s' "$BLUR_STRENGTH"
+  elif glass_on; then
+    printf 40
+  else
+    printf 10
+  fi
 }
 
 # A percent as Hyprland's brightness: 115 is 1.15.
@@ -1317,7 +1331,8 @@ brightness_of() {
 
 # Strength moves blur size and passes together, since they only look right in
 # proportion: a large size over few passes turns blocky. 0% is size 2 over one
-# pass, 40% (the default) size 10 over three, 100% size 22 over four.
+# pass, 10% Glassy's size 4 over two, 40% Frosted glass's size 10 over three,
+# 100% size 22 over four.
 size_of() {
   printf '%d' $((2 + $1 / 5))
 }
@@ -1333,22 +1348,20 @@ passes_of() {
 # only how Hyprland blurs, so it means nothing while Hyprland's blur is off.
 write_glass() {
   mkdir -p "$TOGGLES_DIR" || return 1
-  local tmp brightness strength size passes
+  local tmp brightness
   brightness=$(brightness_of "$(glass_brightness)")
-  strength=$(glass_strength)
-  size=$(size_of "$strength")
-  passes=$(passes_of "$strength")
   tmp=$(mktemp "$TOGGLES_DIR/.glass.XXXXXX") || return 1
   cat >"$tmp" <<EOF
 -- Written by the Terminal opacity bar widget (bhj.terminal-opacity): its
 -- Frosted glass switch. Turning the switch off deletes this file. Named to
 -- load after window-glassy.lua, so these settings win over Glassy's.
--- Brightness $(glass_brightness)%, strength $strength%.
+-- Brightness $(glass_brightness)%. A Blur strength, when set, wins over the
+-- size and passes here.
 hl.config({
   decoration = {
     blur = {
-      size = $size,
-      passes = $passes,
+      size = 10,
+      passes = 3,
       brightness = $brightness,
       contrast = 0.9,
       vibrancy = 0.5,
@@ -1359,6 +1372,98 @@ hl.config({
 })
 EOF
   mv -f "$tmp" "$GLASS_FILE"
+}
+
+# Some terminal is blurred: every one by default, or one window of its own.
+# Needs the state loaded.
+blur_wanted() {
+  (( BLUR )) && return 0
+  local addr
+  for addr in "${!BOV[@]}"; do
+    [[ ${BOV[$addr]} == 1 ]] && return 0
+  done
+  return 1
+}
+
+write_strength() {
+  mkdir -p "$TOGGLES_DIR" || return 1
+  local tmp
+  tmp=$(mktemp "$TOGGLES_DIR/.strength.XXXXXX") || return 1
+  cat >"$tmp" <<EOF
+-- Written by the Terminal opacity bar widget (bhj.terminal-opacity): its
+-- Blur strength slider, at $BLUR_STRENGTH%. There only while some terminal is
+-- blurred. Named to load after window-glassy.lua and the widget's glass file.
+hl.config({
+  decoration = {
+    blur = {
+      size = $(size_of "$BLUR_STRENGTH"),
+      passes = $(passes_of "$BLUR_STRENGTH"),
+    },
+  },
+})
+EOF
+  if [[ -f $STRENGTH_FILE ]] && cmp -s "$tmp" "$STRENGTH_FILE"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$STRENGTH_FILE"
+}
+
+# Puts the strength file in step with the blur switch: there, with the picked
+# strength set live, while some terminal is blurred; gone otherwise, with a
+# reload so Hyprland goes back to Glassy's or Frosted glass's blur. Needs the
+# state loaded. Does nothing when nothing changed, so it is cheap to call.
+apply_strength() {
+  if blur_wanted && [[ -n $BLUR_STRENGTH ]]; then
+    local had=0
+    [[ -f $STRENGTH_FILE ]] && had=1
+    write_strength || {
+      ERROR="Couldn't write $STRENGTH_FILE."
+      return 1
+    }
+    (( had )) || set_live_glass strength "$BLUR_STRENGTH"
+  elif [[ -f $STRENGTH_FILE ]]; then
+    rm -f "$STRENGTH_FILE"
+    hypr_reload_ok
+  fi
+  return 0
+}
+
+# A new blur strength: saved, and in effect while some terminal is blurred.
+cmd_strength() {
+  local value=${1:-}
+  if ! [[ $value =~ ^[0-9]+$ ]] || (( value > 100 )); then
+    ERROR="Blur strength is a percent from 0 to 100."
+    return 1
+  fi
+  lock_state
+  load_state
+  BLUR_STRENGTH=$value
+  save_state
+  unlock_state
+  if ! blur_wanted; then
+    NOTE="Saved. No terminal is blurred, so it applies when \"Blur what shows through\" is on."
+    return 0
+  fi
+  write_strength || {
+    ERROR="Couldn't write $STRENGTH_FILE."
+    return 1
+  }
+  if ! set_live_glass strength "$value"; then
+    ERROR="Saved, but Hyprland didn't take it live. Check: hyprctl configerrors"
+    return 1
+  fi
+  return 0
+}
+
+# A step of a strength drag: shown, not saved.
+cmd_strength_preview() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] || return 1
+  lock_state
+  load_state
+  unlock_state
+  blur_wanted || return 0
+  set_live_glass strength "$(clamp "$1" 0 100)"
 }
 
 # Sets one frosted glass setting live in Hyprland, without a reload. Percents
@@ -1373,36 +1478,22 @@ set_live_glass() {
   timeout 2 hyprctl eval "hl.config({ decoration = { blur = { $lua } } })" >/dev/null 2>&1
 }
 
-# The range of one frosted glass setting, as "min max".
-glass_range() {
-  case "$1" in
-    brightness) printf '%s %s' "$GLASS_BRIGHTNESS_MIN" "$GLASS_BRIGHTNESS_MAX" ;;
-    strength) printf '0 100' ;;
-    *) return 1 ;;
-  esac
-}
-
-# A step of a drag: shown, not saved. `glasspreview <brightness|strength> N`;
-# a bare number is a brightness, as before strength had a slider.
+# A step of a brightness drag: shown, not saved. `glasspreview [brightness] N`.
 cmd_glass_preview() {
-  local what=$1 value=${2:-} range
-  if [[ $what =~ ^[0-9]+$ ]]; then value=$what; what=brightness; fi
-  range=$(glass_range "$what") || return 1
+  local value=$1
+  [[ $value == brightness ]] && value=${2:-}
   [[ $value =~ ^[0-9]+$ ]] || return 1
   glass_on || return 0
-  set_live_glass "$what" "$(clamp "$value" ${range% *} ${range#* })"
+  set_live_glass brightness "$(clamp "$value" "$GLASS_BRIGHTNESS_MIN" "$GLASS_BRIGHTNESS_MAX")"
 }
 
-# A new brightness or strength: saved, written into the file so it outlasts a
-# reload, and set live. While frosted glass is off it is only saved.
+# A new brightness: saved, written into the file so it outlasts a reload, and
+# set live. While frosted glass is off it is only saved.
 glass_set() {
   local what=$1 percent=$2
   lock_state
   load_state
-  case "$what" in
-    brightness) GLASS_BRIGHTNESS=$percent ;;
-    strength) GLASS_STRENGTH=$percent ;;
-  esac
+  GLASS_BRIGHTNESS=$percent
   save_state
   unlock_state
   glass_on || {
@@ -1421,23 +1512,19 @@ glass_set() {
 }
 
 cmd_glass() {
-  local want what=brightness value range
+  local want value
   case "${1:-}" in
     on | true | 1) want=1 ;;
     off | false | 0) want=0 ;;
     toggle) glass_on && want=0 || want=1 ;;
     *)
       value=${1:-}
-      if [[ $value == brightness || $value == strength ]]; then
-        what=$value
-        value=${2:-}
-      fi
-      range=$(glass_range "$what")
-      if [[ $value =~ ^[0-9]+$ ]] && (( value >= ${range% *} && value <= ${range#* } )); then
-        glass_set "$what" "$value"
+      [[ $value == brightness ]] && value=${2:-}
+      if [[ $value =~ ^[0-9]+$ ]] && (( value >= GLASS_BRIGHTNESS_MIN && value <= GLASS_BRIGHTNESS_MAX )); then
+        glass_set brightness "$value"
         return
       fi
-      ERROR="Frosted glass is on, off, toggle, brightness $GLASS_BRIGHTNESS_MIN-$GLASS_BRIGHTNESS_MAX or strength 0-100."
+      ERROR="Frosted glass is on, off, toggle, or brightness $GLASS_BRIGHTNESS_MIN-$GLASS_BRIGHTNESS_MAX."
       return 1
       ;;
   esac
@@ -1772,12 +1859,12 @@ cmd_uninstall() {
   flush_props
   unwire
   write_frost ""
-  if glass_on; then
-    rm -f "$GLASS_FILE"
+  if glass_on || [[ -f $STRENGTH_FILE ]]; then
+    rm -f "$GLASS_FILE" "$STRENGTH_FILE"
     hypr_reload_ok
   fi
   rm -f "$HOOK" "$STATE"
-  echo "Terminal opacity's hook, state, config includes, dropdown frost and frosted glass are removed."
+  echo "Terminal opacity's hook, state, config includes, dropdown frost, frosted glass and blur strength are removed."
   echo "Window corners are Omarchy's own setting and stay as they are: omarchy hyprland corners theme"
   echo "Take the widget out of the bar in ~/.config/omarchy/shell.json, then delete $PLUGIN_DIR."
 }
@@ -1804,6 +1891,8 @@ cmd_serve() {
         frost) cmd_frost "${a:-}"; cmd_sync; emit_state ;;
         glass) cmd_glass "${a:-}" "${b:-}"; emit_state ;;
         glasspreview) cmd_glass_preview "${a:-}" "${b:-}" ;;
+        strength) cmd_strength "${a:-}"; emit_state ;;
+        strengthpreview) cmd_strength_preview "${a:-}" ;;
         corners) cmd_corners "${a:-}"; emit_state ;;
         quit) break ;;
       esac
@@ -1831,7 +1920,7 @@ Usage: terminal-opacity <command>
                                    Frost the bar's dropdowns; follow matches the terminals
   glass <on|off|toggle>            Frosted glass: a heavier, lighter Hyprland blur
   glass brightness <50-200>        Its brightness (100 leaves it as is)
-  glass strength <0-100>           How strongly it blurs (size and passes together)
+  strength <0-100>                 Blur strength while terminals blur (size and passes)
   corners <on|off|toggle|sharp>    Round window corners (off follows the theme)
   colors <program> [arguments]     Run a program, then list the backgrounds it paints
   reapply                          Put every terminal back on its saved value
@@ -1893,7 +1982,7 @@ case "$command" in
     emit_state
     exit $status
     ;;
-  glass | corners)
+  glass | corners | strength)
     (( $# == 1 )) || [[ $# == 2 && $command == glass ]] || usage
     "cmd_$command" "$@"
     status=$?

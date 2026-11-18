@@ -34,10 +34,12 @@ itself is 38% solid with blur behind it, like the terminals.
   picked: every terminal, or one window until it closes. It is off at first,
   so what is behind a terminal shows through sharp. If Hyprland's own blur is
   off, a **Turn on Hyprland's blur** button appears under it (see [Blur](#blur)).
+  While any terminal is blurred, a **Blur strength** slider sits under it
+  (see [Blur strength](#blur-strength)).
 - **Frosted glass** makes Hyprland's blur heavier and brighter, so what is
   behind a terminal, the bar or a menu reads as frosted glass rather than a
-  dimmed smudge. While it is on, **Frost brightness** and **Blur strength**
-  sliders sit under it (see [Frosted glass](#frosted-glass)). Off at first.
+  dimmed smudge. While it is on, a **Frost brightness** slider sits under it
+  (see [Frosted glass](#frosted-glass)). Off at first.
 - **Fade painted backgrounds too** fades the solid colours that programs
   paint, such as the panels of a CLI harness. It is one choice for every
   terminal, and off at first.
@@ -122,27 +124,41 @@ Hyprland reloads; if it reports a config error the file is taken out again.
 ```sh
 terminal-opacity glass on
 terminal-opacity glass brightness 130   # 50 to 200; 100 leaves it as is
-terminal-opacity glass strength 60      # 0 to 100
 terminal-opacity glass off
 ```
 
-While it is on, two sliders sit under the switch:
+While it is on, a **Frost brightness** slider sits under the switch, from 50%
+(dimmer than what is behind) through 100% (as is) to 200% (brighter); 115% at
+first. Dragging changes Hyprland's blur live with `hyprctl eval`, with no
+reload; letting go saves it into the file. It goes away when the switch is
+off, and the value is kept for the next time it is on.
 
-- **Frost brightness**, from 50% (dimmer than what is behind) through 100%
-  (as is) to 200% (brighter); 115% at first.
-- **Blur strength**, from 0% (a light haze) to 100% (heavy frost); 40% at
-  first. It moves Hyprland's blur size and passes together, since a large
-  size over few passes turns blocky:
+## Blur strength
 
-  | Strength | 0% | 20% | 40% | 60% | 80% | 100% |
-  |---|---|---|---|---|---|---|
-  | size | 2 | 6 | 10 | 14 | 18 | 22 |
-  | passes | 1 | 2 | 3 | 4 | 4 | 4 |
+While **Blur what shows through** is on for any terminal, a **Blur strength**
+slider sits under it, from 0% (a light haze) to 100% (heavy frost). It moves
+Hyprland's blur size and passes together, since a large size over few passes
+turns blocky:
 
-Dragging either changes Hyprland's blur live with `hyprctl eval`, with no
-reload; letting go saves it into the file. Both go away when the switch is
-off, and their values are kept for the next time it is on. More passes cost
-more GPU on every blurred frame.
+| Strength | 0% | 10% | 20% | 40% | 60% | 80% | 100% |
+|---|---|---|---|---|---|---|---|
+| size | 2 | 4 | 6 | 10 | 14 | 18 | 22 |
+| passes | 1 | 2 | 2 | 3 | 4 | 4 | 4 |
+
+10% is Glassy's own blur and 40% is Frosted glass's, and until the slider is
+moved it shows whichever of those is in effect. Once moved, the strength is
+written to `~/.local/state/omarchy/toggles/hypr/zz-bhj-terminal-opacity-strength.lua`,
+which loads after Glassy and Frosted glass and so wins over both. Dragging
+changes Hyprland live with `hyprctl eval`; letting go saves it.
+
+It is Hyprland's one blur, so it reaches the bar and menus too. When no
+terminal is blurred any more, the slider goes away and the file is taken out,
+handing the blur back to Glassy or Frosted glass; the value is kept for the
+next time. More passes cost more GPU on every blurred frame.
+
+```sh
+terminal-opacity strength 60
+```
 
 ## Round corners
 
@@ -230,7 +246,8 @@ The first change adds one include line to each terminal config that exists
 "Reloaded the configuration" toast, which would otherwise show on every step.
 
 `terminal-opacity uninstall` removes the hook, the saved state, those
-includes, the dropdown frost line and the frosted glass file.
+includes, the dropdown frost line, and the frosted glass and blur strength
+files.
 
 ## Command line
 
@@ -244,7 +261,7 @@ terminal-opacity cells on
 terminal-opacity glassy
 terminal-opacity frost on
 terminal-opacity glass toggle
-terminal-opacity glass strength 60
+terminal-opacity strength 60
 terminal-opacity corners toggle
 terminal-opacity colors grok
 terminal-opacity nudge focused -5
