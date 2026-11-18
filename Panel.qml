@@ -26,6 +26,8 @@ Panel {
   readonly property bool glass: service ? service.glass : false
   readonly property int glassBrightness: service ? service.glassBrightness : 115
   readonly property int glassShown: glassSlider.dragging ? Math.round(glassSlider.liveValue) : glassBrightness
+  readonly property int glassStrength: service ? service.glassStrength : 40
+  readonly property int strengthShown: strengthSlider.dragging ? Math.round(strengthSlider.liveValue) : glassStrength
   readonly property string corners: service ? service.corners : "theme"
   readonly property bool rounded: corners === "rounded"
   // What the dropdowns show now, live while either slider is dragged.
@@ -188,7 +190,11 @@ Panel {
 
   function adjust(delta) {
     if (focusSection === "glassSlider") {
-      if (service) service.commitGlass(glassBrightness + delta)
+      if (service) service.commitGlass("brightness", glassBrightness + delta)
+      return
+    }
+    if (focusSection === "glassStrength") {
+      if (service) service.commitGlass("strength", glassStrength + delta)
       return
     }
     if (focusSection === "frostSlider") {
@@ -231,13 +237,14 @@ Panel {
     if (service && !switchingGlassy) service.turnOnGlassy()
   }
 
-  // Top to bottom: the slider, the switches (then the Glassy button while
+  // Top to bottom: the slider, the switches in panel order (blur, frosted
+  // glass, painted backgrounds, dropdowns, corners; then the Glassy button while
   // Hyprland's blur is off and something wants it), then the rows.
   readonly property var sections: {
-    var list = ["slider", "blur", "cells", "frost"]
+    var list = ["slider", "blur", "glass"]
+    if (glass) list.push("glassSlider", "glassStrength")
+    list.push("cells", "frost")
     if (frost) list.push("frostSlider", "frostMode")
-    list.push("glass")
-    if (glass) list.push("glassSlider")
     list.push("corners")
     if (needsGlassy) list.push("glassy")
     return list
@@ -307,7 +314,7 @@ Panel {
       toggleCorners()
       return
     }
-    if (focusSection === "frostSlider" || focusSection === "glassSlider") return
+    if (focusSection === "frostSlider" || focusSection === "glassSlider" || focusSection === "glassStrength") return
     if (focusSection !== "rows" || selectedIndex < 0 || selectedIndex >= rows.length) return
     // Moving up to the switch passes through "All terminals" and picks it, so
     // Enter on a row is how the keyboard flips the blur of that row.
@@ -332,7 +339,7 @@ Panel {
   onWindowsChanged: follow()
   onNeedsGlassyChanged: if (!needsGlassy && focusSection === "glassy") focusSection = "corners"
   onFrostChanged: if (!frost && (focusSection === "frostSlider" || focusSection === "frostMode")) focusSection = "frost"
-  onGlassChanged: if (!glass && focusSection === "glassSlider") focusSection = "glass"
+  onGlassChanged: if (!glass && (focusSection === "glassSlider" || focusSection === "glassStrength")) focusSection = "glass"
   onDefaultOpacityChanged: follow()
 
   onOpenedChanged: {
@@ -554,6 +561,183 @@ Panel {
             onClicked: root.toggleBlur()
           }
 
+          // How Hyprland blurs, for everything it blurs, not just terminals.
+          Toggle {
+            id: glassToggle
+            width: parent.width
+            label: "Frosted glass"
+            description: root.glass && !root.blurAvailable
+              ? "Set, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
+              : root.glass
+                ? "A heavier, lighter blur behind terminals, the bar and menus"
+                : "Omarchy's own blur: softer, and it dims a little"
+            checked: root.glass
+            hasCursor: root.cursorActive && root.focusSection === "glass"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassToggle)
+            onHovered: function(on) {
+              if (!on) return
+              root.cursorActive = true
+              root.focusSection = "glass"
+              root.selectedIndex = -1
+            }
+            onClicked: root.toggleGlass()
+          }
+
+          // How bright what shows through frosted glass is, and how strongly
+          // it blurs. Only there while frosted glass is on. 100% brightness
+          // leaves Hyprland's blur as bright as what is behind it.
+          Column {
+            visible: root.glass
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(glassHeader.implicitHeight, glassPercent.implicitHeight)
+
+              PanelSectionHeader {
+                id: glassHeader
+                text: "FROST BRIGHTNESS"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: glassPercent
+                textFormat: Text.PlainText
+                text: root.glassShown + "%"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            CursorSurface {
+              id: glassSliderSurface
+              width: parent.width
+              height: glassSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "glassSlider"
+              foreground: root.bar.foreground
+              outline: true
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassSliderSurface)
+
+              PanelSlider {
+                id: glassSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: 50
+                maximum: 200
+                step: 5
+                integer: true
+                // The saved value only: tying it to the drag would hand the
+                // old value back the moment the slider lets go, before it
+                // reports where it was let go.
+                value: root.glassBrightness
+                onMoved: function(v) { if (root.service) root.service.previewGlass("brightness", v) }
+                onReleased: function(v) { if (root.service) root.service.commitGlass("brightness", v) }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "glassSlider"
+                  root.selectedIndex = -1
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "50% dimmer  ·  100% as is  ·  200% brighter"
+              color: Qt.darker(root.bar.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(strengthHeader.implicitHeight, strengthPercent.implicitHeight) + Style.space(8)
+
+              PanelSectionHeader {
+                id: strengthHeader
+                text: "BLUR STRENGTH"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+              }
+
+              Text {
+                id: strengthPercent
+                textFormat: Text.PlainText
+                text: root.strengthShown + "%"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: strengthHeader.verticalCenter
+              }
+            }
+
+            CursorSurface {
+              id: strengthSliderSurface
+              width: parent.width
+              height: strengthSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "glassStrength"
+              foreground: root.bar.foreground
+              outline: true
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(strengthSliderSurface)
+
+              PanelSlider {
+                id: strengthSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: 0
+                maximum: 100
+                step: 5
+                integer: true
+                // The saved value only, as with brightness above.
+                value: root.glassStrength
+                onMoved: function(v) { if (root.service) root.service.previewGlass("strength", v) }
+                onReleased: function(v) { if (root.service) root.service.commitGlass("strength", v) }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "glassStrength"
+                  root.selectedIndex = -1
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "0% a light haze  ·  100% heavy frost"
+              color: Qt.darker(root.bar.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
           Toggle {
             id: cellsToggle
             width: parent.width
@@ -691,112 +875,6 @@ Panel {
                 root.focusSection = "frostMode"
                 root.selectedIndex = -1
               }
-            }
-          }
-
-          // How Hyprland blurs, for everything it blurs, not just terminals.
-          Toggle {
-            id: glassToggle
-            width: parent.width
-            label: "Frosted glass"
-            description: root.glass && !root.blurAvailable
-              ? "Set, but Hyprland's blur is off, so nothing blurs yet. Turn it on below."
-              : root.glass
-                ? "A heavier, lighter blur behind terminals, the bar and menus"
-                : "Omarchy's own blur: softer, and it dims a little"
-            checked: root.glass
-            hasCursor: root.cursorActive && root.focusSection === "glass"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassToggle)
-            onHovered: function(on) {
-              if (!on) return
-              root.cursorActive = true
-              root.focusSection = "glass"
-              root.selectedIndex = -1
-            }
-            onClicked: root.toggleGlass()
-          }
-
-          // How bright what shows through frosted glass is. Only there while
-          // frosted glass is on. 100% leaves Hyprland's blur as bright as
-          // what is behind it.
-          Column {
-            visible: root.glass
-            width: parent.width
-            spacing: Style.space(6)
-
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(glassHeader.implicitHeight, glassPercent.implicitHeight)
-
-              PanelSectionHeader {
-                id: glassHeader
-                text: "FROST BRIGHTNESS"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Text {
-                id: glassPercent
-                textFormat: Text.PlainText
-                text: root.glassShown + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-              }
-            }
-
-            CursorSurface {
-              id: glassSliderSurface
-              width: parent.width
-              height: glassSlider.implicitHeight + Style.spacing.controlGap
-              hasCursor: root.cursorActive && root.focusSection === "glassSlider"
-              foreground: root.bar.foreground
-              outline: true
-              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(glassSliderSurface)
-
-              PanelSlider {
-                id: glassSlider
-                bar: root.bar
-                anchors.fill: parent
-                anchors.leftMargin: Style.space(6)
-                anchors.rightMargin: Style.space(6)
-                minimum: 50
-                maximum: 200
-                step: 5
-                integer: true
-                // The saved value only: tying it to the drag would hand the
-                // old value back the moment the slider lets go, before it
-                // reports where it was let go.
-                value: root.glassBrightness
-                onMoved: function(v) { if (root.service) root.service.previewGlass(v) }
-                onReleased: function(v) { if (root.service) root.service.commitGlass(v) }
-              }
-
-              HoverHandler {
-                onHoveredChanged: if (hovered) {
-                  root.cursorActive = true
-                  root.focusSection = "glassSlider"
-                  root.selectedIndex = -1
-                }
-              }
-            }
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "50% dimmer  ·  100% as is  ·  200% brighter"
-              color: Qt.darker(root.bar.foreground, 1.55)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
             }
           }
 
