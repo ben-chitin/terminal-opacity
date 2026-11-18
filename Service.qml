@@ -37,6 +37,10 @@ Item {
   property bool glass: false
   // Anything differs from Omarchy's defaults, so there is something to reset.
   property bool customized: false
+  // The current theme's name, and whether it sets corners, terminal opacity
+  // or Hyprland rules of its own, which a reset hands back to it.
+  property bool themeOwn: false
+  property string themeName: ""
   // Frosted glass brightness, a percent of Hyprland's: 100 leaves it as is.
   property int glassBrightness: 115
   // Blur strength, 0 to 100: Hyprland's blur size and passes together, in
@@ -211,6 +215,8 @@ Item {
     blurAvailable = data.blurAvailable === true
     glass = data.glass === true
     customized = data.customized === true
+    themeOwn = data.themeOwn === true
+    themeName = String(data.themeName || "")
     if (typeof data.glassBrightness === "number") glassBrightness = data.glassBrightness
     if (typeof data.blurStrength === "number") blurStrength = data.blurStrength
     if (typeof data.cornerRadius === "number") cornerRadius = data.cornerRadius

@@ -83,6 +83,10 @@ Panel {
   readonly property string allAddress: "*"
   readonly property string resetAddress: "!reset"
   readonly property bool customized: service ? service.customized : false
+  // Whose defaults a reset goes back to: the theme's, where it sets any of
+  // what is here, else Omarchy's.
+  readonly property string resetName: service && service.themeOwn && service.themeName !== ""
+    ? service.themeName : "Omarchy"
   // Resetting undoes every setting here, so it takes a second click.
   property bool confirmingReset: false
 
@@ -140,7 +144,7 @@ Panel {
     if (customized || defaultSet || anyOverride) {
       list.push({
         address: resetAddress,
-        title: confirmingReset ? "Reset everything?" : "Reset to Omarchy's defaults",
+        title: confirmingReset ? "Reset everything?" : "Reset to " + resetName + "'s defaults",
         detail: confirmingReset
           ? "Click or press Enter again to undo everything"
           : "Opacity, blur, glass, dropdowns and corners",

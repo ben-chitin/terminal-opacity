@@ -56,7 +56,10 @@ itself is 38% solid with blur behind it, like the terminals.
   the theme's, every switch goes off, every slider is forgotten, corners go
   back to the theme's, and Glassy windows go back to Omarchy's plain
   transparent ones. It asks for a second click first. It shows whenever
-  anything differs from those defaults.
+  anything differs from those defaults. When the theme sets any of this
+  itself (corners, its terminals' opacity, or Hyprland rules for them, as
+  Solitude and Kanagawa do), each of those goes back to the theme's, and the
+  row says so: **Reset to Solitude's defaults**.
 
 **All terminals** saves a default. New terminals open with it, and it survives
 theme changes. One window's value is its own until that window closes.

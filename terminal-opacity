@@ -974,6 +974,7 @@ ERROR=""
 emit_state() {
   local addr rows=""
   GLOBAL_ROUNDING=$(global_rounding)
+  theme_info
   for addr in "${W_ORDER[@]}"; do
     rows+="$addr$US${W_TITLE[$addr]}$US${W_NAME[$addr]}$US${W_EMU[$addr]}$US$(value_of "$addr")$US"
     rows+="$([[ -n ${OV[$addr]:-} ]] && printf true || printf false)$US${W_FOCUSED[$addr]}$US${W_FS[$addr]}$US"
@@ -986,7 +987,7 @@ emit_state() {
   jq -Rnc --arg default "$DEFAULT" --argjson shown "$shown" --arg note "$NOTE" --arg error "$ERROR" --arg frost "$FROST" \
     --arg frostPercent "$([[ -n $FROST ]] && frost_percent)" \
     --arg focused "$FOCUSED_ADDR" --arg cells "$CELLS" --arg blur "$BLUR" --arg blurAvailable "$BLUR_AVAILABLE" \
-    --arg glass "$(glass_on && printf 1)" --arg customized "$(customized && printf 1)" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
+    --arg glass "$(glass_on && printf 1)" --arg customized "$(customized && printf 1)" --arg themeOwn "$THEME_OWN" --arg themeName "$THEME_DISPLAY" --arg glassBrightness "$(glass_brightness)" --arg blurStrength "$(blur_strength)" --arg cornerRadius "${CORNER_RADIUS:-$CORNER_RADIUS_DEFAULT}" --arg corners "$(corners_now)" '
     {
       type: "state",
       ok: ($error == ""),
@@ -1003,6 +1004,8 @@ emit_state() {
       blurAvailable: ($blurAvailable == "true"),
       glass: ($glass == "1"),
       customized: ($customized == "1"),
+      themeOwn: ($themeOwn == "1"),
+      themeName: $themeName,
       glassBrightness: ($glassBrightness | tonumber),
       blurStrength: ($blurStrength | tonumber),
       cornerRadius: ($cornerRadius | tonumber),
@@ -2058,6 +2061,42 @@ cmd_reset() {
   apply_window_corners
 }
 
+# --- The theme's own settings ----------------------------------------------
+#
+# A reset hands each setting to the theme where the theme sets one (its
+# corners, its terminals' opacity, its Hyprland rules), and to Omarchy's
+# defaults elsewhere. The panel names the theme when it sets any of these.
+# Looked up once per theme change, since it starts a few processes.
+
+THEME_KEY=""
+THEME_OWN=0
+THEME_DISPLAY=""
+
+theme_info() {
+  local name key dirs=() dir
+  name=""
+  [[ -r $STATE_DIR/current/theme.name ]] && name=$(<"$STATE_DIR/current/theme.name")
+  key="$name:$(stat -c %Y "$STATE_DIR/current/theme.generation" 2>/dev/null)"
+  [[ $key == "$THEME_KEY" ]] && return 0
+  THEME_KEY=$key
+  THEME_OWN=0
+  THEME_DISPLAY=""
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || return 0
+  THEME_DISPLAY=$(timeout 2 omarchy theme current 2>/dev/null | head -1)
+  [[ -n $THEME_DISPLAY ]] || THEME_DISPLAY=$name
+  # A user copy can be a whole theme or a few files laid over the stock one.
+  [[ -d $CONFIG_DIR/omarchy/themes/$name ]] && dirs+=("$CONFIG_DIR/omarchy/themes/$name")
+  [[ -d /usr/share/omarchy/themes/$name ]] && dirs+=("/usr/share/omarchy/themes/$name")
+  for dir in "${dirs[@]}"; do
+    if grep -qsE '\b(rounding|opacity|blur|transparent_window)\b' "$dir/hyprland.lua" ||
+      grep -qsiE '^[[:space:]]*(opacity|background_opacity|background-opacity|alpha)[[:space:]]*=' \
+        "$dir/alacritty.toml" "$dir/kitty.conf" "$dir/ghostty.conf" "$dir/foot.ini"; then
+      THEME_OWN=1
+      return 0
+    fi
+  done
+}
+
 # Whether anything here differs from Omarchy's own defaults: a saved opacity,
 # a window's own settings, any switch on, a saved slider, or Glassy windows
 # (which the panel's "Turn on Hyprland's blur" switches on). Needs the state
@@ -2100,7 +2139,10 @@ cmd_reset_all() {
   fi
   hypr_reload_ok
   cmd_sync
-  [[ -n $ERROR ]] || NOTE="Back to Omarchy's defaults."
+  theme_info
+  if [[ -z $ERROR ]]; then
+    (( THEME_OWN )) && NOTE="Back to $THEME_DISPLAY's defaults." || NOTE="Back to Omarchy's defaults."
+  fi
 }
 
 cmd_install() {
